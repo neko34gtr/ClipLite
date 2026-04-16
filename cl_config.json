@@ -1,0 +1,10 @@
+{
+    "pos_x": 100,
+    "pos_y": 100,
+    "save_mode": "gdrive",
+    "local_path": "C:\\Users\\meris\\source\\repos\\ClipLite\\ClipLite\\exports",
+    "gdrive_path": "G:/マイドライブ/images",
+    "start_hidden": false,
+    "auto_fallback": true,
+    "save_interval": 5
+}
