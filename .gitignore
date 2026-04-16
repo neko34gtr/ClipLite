@@ -20,3 +20,6 @@ dist/
 Thumbs.db
 desktop.ini
 /新規 テキスト ドキュメント.txt
+
+# プログラムの設定ファイル
+cl_config.json
