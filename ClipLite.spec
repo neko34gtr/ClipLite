@@ -2,7 +2,7 @@
 
 
 a = Analysis(
-    ['ClipLite.pyw'],
+    ['ClipLite.py'],
     pathex=[],
     binaries=[],
     datas=[('ClipLite.ico', '.')],
@@ -10,7 +10,7 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=['tkinter.test', 'lib23', 'email', 'pydoc', 'http', 'xml', 'html'],
+    excludes=['tkinter.test', 'lib2to3', 'pydoc', 'antlr4'],
     noarchive=False,
     optimize=0,
 )
