@@ -253,7 +253,7 @@ class ClipLiteApp:
         if self.start_hidden.get():
             self.root.withdraw()
 
-    # --- 自動アップデートチェック関数
+    # --- 自動アップデートチェック関数 トークン無しでもPulicであればOK
     def check_for_updates(self):
         """GitHub Releasesから最新バージョンを確認する"""
         def _check():
