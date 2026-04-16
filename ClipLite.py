@@ -37,6 +37,23 @@ def resource_path(relative_path):
         base_path = os.path.abspath(".")
     return os.path.join(base_path, relative_path)
 
+# [ADD] 外部ファイル .key からトークンを読み込む関数を新規追加 2026/04/17
+def load_github_token():
+    """プロジェクトルートの .key ファイルからトークンを読み込む"""
+    # 実行ファイルと同じ階層の .key ファイルを参照
+    key_path = os.path.join(os.path.dirname(__file__), '.key')
+    if os.path.exists(key_path):
+        try:
+            with open(key_path, 'r', encoding='utf-8') as f:
+                for line in f:
+                    if line.startswith('GITHUB_TOKEN='):
+                        parts = line.strip().split('=', 1)
+                        if len(parts) > 1:
+                            return parts[1]
+        except Exception:
+            return None
+    return None
+
 # --- ClipLite 定数・初期設定 ---
 VERSION = "2.4.0"
 AUTHOR_INFO = "neko52tsai@gmail.com"
@@ -45,6 +62,8 @@ AUTHOR_INFO = "neko52tsai@gmail.com"
 GITHUB_USER = "neko34gtr"
 GITHUB_REPO = "ClipLite"
 API_URL = f"https://api.github.com/repos/{GITHUB_USER}/{GITHUB_REPO}/releases/latest"
+# [ADD] 読み込んだトークンを保持する変数を定義
+GITHUB_TOKEN = load_github_token()
 
 # メールの件名と本文を定義
 mail_subject = f"【問合せ】ClipLite Pro {VERSION} について"
@@ -239,8 +258,14 @@ class ClipLiteApp:
         """GitHub Releasesから最新バージョンを確認する"""
         def _check():
             try:
+                # [ADD] 認証ヘッダーの準備 2026/04/17
+                headers = {}
+                if GITHUB_TOKEN:
+                    headers["Authorization"] = f"token {GITHUB_TOKEN}"
+
                 # GitHub APIから最新リリースの情報を取得
-                response = requests.get(API_URL, timeout=10)
+                # [MOD] requests.get に headers 引数を追加 2026/04/17
+                response = requests.get(API_URL, headers=headers, timeout=10)
                 if response.status_code == 200:
                     data = response.json()
                     # タグ名（例: v2.5.0）を取得。VERSION変数と比較
@@ -266,8 +291,14 @@ class ClipLiteApp:
     def perform_update(self):
         """最新のEXEをダウンロードして置換を実行する"""
         try:
+            # [ADD] 認証ヘッダーの準備 2026/04/17
+            headers = {}
+            if GITHUB_TOKEN:
+                headers["Authorization"] = f"token {GITHUB_TOKEN}"
+
             # 1. 最新リリースの情報を再取得
-            response = requests.get(API_URL, timeout=10)
+            # [MOD] 最新リリース情報の取得に headers を追加
+            response = requests.get(API_URL, headers=headers, timeout=10)
             response.raise_for_status()
             data = response.json()
         
@@ -283,8 +314,9 @@ class ClipLiteApp:
                 return
 
             # 3. 一時フォルダにダウンロード
+            # [MOD] EXEファイルのダウンロード本体に headers を追加 2026/04/17
             temp_exe = os.path.join(os.environ['TEMP'], "ClipLite_new.exe")
-            exe_data = requests.get(download_url, timeout=30)
+            exe_data = requests.get(download_url, headers=headers, timeout=30)
             with open(temp_exe, "wb") as f:
                 f.write(exe_data.content)
 
@@ -307,40 +339,6 @@ class ClipLiteApp:
 
         except Exception as e:
             tk.messagebox.showerror("Error", f"アップデート中にエラーが発生しました: {e}")
-
-    """
-    古いコード
-    def perform_update_old(self):
-        # 最新EXEの場所 (Gドライブ)
-        src_exe = r"G:\共有ドライブ\\00共有\00 共通フォルダ\EUC関連資料\SysUpdate\ClipLite.exe"
-        # 現在実行中の自分自身のパス
-        dest_exe = sys.executable 
-     
-        if not os.path.exists(src_exe):
-            tk.messagebox.showerror("Error", "更新用ファイルが見つかりません。\nGドライブの接続を確認してください。")
-            return
-
-        # 念のため実行場所の書き込み権限を確認
-        if not os.access(os.path.dirname(dest_exe), os.W_OK):
-            tk.messagebox.showerror("Error", "実行ファイルの保存場所への書き込み権限がありません。\n手動で差し替えてください。")
-            return
-
-        # 自己消滅 & 置換バッチの作成
-        batch_path = os.path.join(os.environ['TEMP'], "cliplite_updater.bat")
-        try:
-            with open(batch_path, "w", encoding="shift-jis") as f:
-                f.write(f'@echo off\n')
-                f.write(f'timeout /t 2 /nobreak > nul\n') # 終了を待つ
-                f.write(f'copy /y "{src_exe}" "{dest_exe}"\n') # 上書き
-                f.write(f'start "" "{dest_exe}"\n') # 再起動
-                f.write(f'del "%~f0"\n') # バッチ自身を消す
-            # バッチを起動して自分を閉じる
-            subprocess.Popen([batch_path], shell=True)
-            self.quit_app()
-
-        except Exception as e:
-            tk.messagebox.showerror("Error", f"更新スクリプトの作成に失敗しました: {e}")
-　　"""
 
     # アップデートトリガー(ダイアログ版)
     def ask_update_dialog(self, new_ver, today_str):
