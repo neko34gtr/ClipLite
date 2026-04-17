@@ -55,7 +55,7 @@ def load_github_token():
     return None
 
 # --- ClipLite 定数・初期設定 ---
-VERSION = "2.4.0"
+VERSION = "2.4.1"
 AUTHOR_INFO = "neko52tsai@gmail.com"
 
 # --- Git定数設定 ---
@@ -627,10 +627,18 @@ class ClipLiteApp:
             return None, " (Suppressed)"
 
         date_folder = now.strftime("%Y%m%d")
-        file_name = now.strftime("clip_%m%d%H%M%S.webp")
 
-        mode = self.save_mode.get() #ここで取得
-        # base_dir = self.local_path.get() if self.save_mode.get() == "local" else self.gdrive_path.get()
+        # --- [MOD] ファイル名生成ロジックの変更 --- 2024/04/17
+        if "original_filename" in img.info:
+            # ドラッグ&ドロップ時：元ファイル名 + mmddhhmmss.webp
+            time_suffix = now.strftime("%m%d%H%M%S")
+            file_name = f"{img.info['original_filename']}_{time_suffix}.webp"
+        else:
+            # クリップボード監視時：clip_+mmddhhmmss.webp
+            file_name = now.strftime("clip_%m%d%H%M%S.webp")
+        # -----------------------------------------
+
+        mode = self.save_mode.get()
         base_dir = self.local_path.get() if mode == "local" else self.gdrive_path.get()
         
         fallback_msg = ""
@@ -677,6 +685,11 @@ class ClipLiteApp:
                     # [ADD] else時（ONの時）は、ここをスキップしてオリジナルのまま次へ進む
 
                     saved_path, fallback_msg = self.save_webp_file(img)
+
+                    # --- [ADD] 保存処理が終わったら、名前情報を破棄して初期化する --- 2026/04/17
+                    if "original_filename" in img.info:
+                        del img.info["original_filename"]
+                    # ----------------------------------------------------------
 
                     # クリップボード書き戻し処理
                     img_p = img.convert("P", palette=Image.ADAPTIVE, colors=256).convert("RGB")
@@ -732,6 +745,7 @@ class ClipLiteApp:
         self.status_frame.configure(bg=STATUS_BG)
         self.status_label.configure(bg=STATUS_BG, fg="#aaaaaa", text="Monitoring Active")
 
+    # --- ドロップファイル処理関数 ---
     def on_drop(self, filenames):
         for fname in filenames:
             path = fname.decode('utf-8', errors='ignore')
@@ -741,6 +755,12 @@ class ClipLiteApp:
                     # img = Image.open(path).copy() [ORG]
                     img = Image.open(path)
                     img.load()  # [ADD] ファイルを閉じる前にピクセルデータをメモリにロード
+
+                    # --- [ADD] 元のファイル名を保持 --- 2026/04/17
+                    base_name = os.path.splitext(os.path.basename(path))[0]
+                    img.info["original_filename"] = base_name
+                    # ----------------------------------
+
                     # ★修正ポイント：ハッシュ値をリセットして確実に変換を走らせる
                     self.last_hash = None
                     self.task_queue.put(img) # [MOD] ロード済みオブジェクトを渡す
@@ -778,7 +798,11 @@ class ClipLiteApp:
                             # 稀にコケるため、RGBに変換して扱うのが安全
                             if img.mode != 'RGB':
                                 img = img.convert('RGB')
-                                
+                            # --- [ADD] クリップボード由来であることを保証するため、名前情報を初期化 ---
+                            if hasattr(img, "info") and "original_filename" in img.info:
+                                del img.info["original_filename"]
+                            # ------------------------------------------------------------------
+                                                            
                             curr_hash = hash(img.tobytes()[:1024])
                             if curr_hash != self.last_hash:
                                 self.task_queue.put(img.copy())
