@@ -20,6 +20,7 @@ import subprocess
 import webbrowser  # メールURL起動用
 import urllib.parse  # URLエンコード用
 import requests  # [ADD] GitHub APIアクセス用
+import gc # [ADD] ガベージコレクションの明示的な呼び出し用
 
 # --- Windowsタスクバー用 ID設定 (Pythonロゴ化を防止) ---
 MY_APP_ID = 'tsai.cliplite.pro.v2' # 任意のユニークな文字列
@@ -55,7 +56,7 @@ def load_github_token():
     return None
 
 # --- ClipLite 定数・初期設定 ---
-VERSION = "2.4.2"
+VERSION = "2.4.3"
 AUTHOR_INFO = "neko52tsai@gmail.com"
 
 # --- Git定数設定 ---
@@ -159,6 +160,7 @@ class ClipLiteApp:
         # 重複抑制設定（デフォルト5秒）
         self.save_interval = tk.IntVar(value=self.config.get("save_interval", 5))
         self.original_size_mode = tk.BooleanVar(value=self.config.get("original_size_mode", False)) # [ADD] オリジナルサイズ優先フラグ
+        self.allow_prerelease = tk.BooleanVar(value=self.config.get("allow_prerelease", False))
         # [ADD] アップデートダイアログの管理用
         # ※これはGUI部品に紐付けないので、通常の辞書操作（self.config）だけでも動きますが、
         # 構造を明示的にするためにここで初期値を確定させておくと安全です。
@@ -255,14 +257,17 @@ class ClipLiteApp:
             self.root.withdraw()
 
     # --- 自動アップデートチェック関数 pre-releaseにも対応出来るようにURLを分けて実装 2026/04/17 ---
+    # ここバグっている
     def check_for_updates(self):
         """GitHub Releasesから最新バージョンを確認する"""
         def _check():
             try:
                 # [ADD] 認証ヘッダーの準備 2026/04/17
                 headers = {}
-                if GITHUB_TOKEN:
-                    headers["Authorization"] = f"token {GITHUB_TOKEN}"
+                # アップデートチェックをする瞬間にファイルを確認し、確実性を高めた
+                token = load_github_token()
+                if token:
+                   headers["Authorization"] = f"token {token}"
 
                 # [ADD] プレリリース許可設定に応じてURLを切り替え 2026/04/17
                 target_url = API_URL_DEV if self.allow_prerelease.get() else API_URL
@@ -270,9 +275,15 @@ class ClipLiteApp:
                 response = requests.get(target_url, headers=headers, timeout=10)
                 if response.status_code == 200:
                     data = response.json()
+
+                    # [MOD] レスポンス形式の判定を厳密化
+                    if isinstance(data, list):
+                        # API_URL_DEV (releases) の場合はリストの先頭が最新
+                        latest_release = data[0] if len(data) > 0 else {}
+                    else:
+                        # API_URL (latest) の場合は辞書がそのまま返る
+                        latest_release = data
                     
-                    # [MOD] URLによってレスポンス形式が異なる（DEVはリスト、Latestは辞書）
-                    latest_release = data[0] if isinstance(data, list) else data
                     v = latest_release.get("tag_name", "").replace("v", "") 
                     self.latest_version_cached = v
 
@@ -443,7 +454,7 @@ class ClipLiteApp:
 
     def open_options(self):
         # プレリリース項目の追加に伴い高さを微調整 (460 -> 490)
-        w, h = 450, 490
+        w, h = 450, 520
         opt_win = tk.Toplevel(self.root)
         opt_win.title("ClipLite Options")
         self.center_window(opt_win, w, h)
@@ -723,11 +734,25 @@ class ClipLiteApp:
                         msg = f"Optimized only{fallback_msg}"
                     
                     self.root.after(0, lambda m=msg: self.update_ui_success(m))
-                    # ハッシュ値を更新
-                    self.last_hash = hash(img_p.tobytes()[:1024])
+
+                    # [MOD] ハッシュ値の更新（メモリ負荷を抑えるため、全体を展開せず極小サイズで計算）
+                    # 以前のコード：self.last_hash = hash(img_p.tobytes()[:1024])
+                    self.last_hash = hash(img_p.resize((8, 8), resample=Image.Resampling.NEAREST).tobytes())
                 except Exception as e:
                     error_txt = "Drive Error" if "Drive not mounted" in str(e) else "Processing Error"
                     self.root.after(0, lambda t=error_txt: self.update_ui_error(t))
+
+                finally:
+                    # [MOD] img_p と img の両方を確実に閉じてメモリを解放する
+                    if 'img_p' in locals() and img_p:
+                        img_p.close()
+                    if 'img' in locals() and img:
+                        img.close()
+                    gc.collect()    # 未使用メモリを即座に回収
+                #finally:
+                #    # [ADD] 処理が終わった画像オブジェクトを確実に閉じる
+                #    if img:
+                #        img.close()
             self.task_queue.task_done()
 
     def update_ui_success(self, msg):
@@ -814,8 +839,11 @@ class ClipLiteApp:
                             if hasattr(img, "info") and "original_filename" in img.info:
                                 del img.info["original_filename"]
                             # ------------------------------------------------------------------
+
+                            # [MOD] ハッシュ計算を軽量化
+                            #curr_hash = hash(img.tobytes()[:1024])
+                            curr_hash = hash(img.resize((8, 8), resample=Image.Resampling.NEAREST).tobytes())
                                                             
-                            curr_hash = hash(img.tobytes()[:1024])
                             if curr_hash != self.last_hash:
                                 self.task_queue.put(img.copy())
                                 # last_hashの更新はworker_loopに任せるかここで行う
