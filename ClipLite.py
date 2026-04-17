@@ -55,13 +55,14 @@ def load_github_token():
     return None
 
 # --- ClipLite 定数・初期設定 ---
-VERSION = "2.4.1"
+VERSION = "2.4.2"
 AUTHOR_INFO = "neko52tsai@gmail.com"
 
 # --- Git定数設定 ---
 GITHUB_USER = "neko34gtr"
 GITHUB_REPO = "ClipLite"
 API_URL = f"https://api.github.com/repos/{GITHUB_USER}/{GITHUB_REPO}/releases/latest"
+API_URL_DEV = f"https://api.github.com/repos/{GITHUB_USER}/{GITHUB_REPO}/releases"
 # [ADD] 読み込んだトークンを保持する変数を定義
 GITHUB_TOKEN = load_github_token()
 
@@ -253,7 +254,7 @@ class ClipLiteApp:
         if self.start_hidden.get():
             self.root.withdraw()
 
-    # --- 自動アップデートチェック関数 トークン無しでもPulicであればOK
+    # --- 自動アップデートチェック関数 pre-releaseにも対応出来るようにURLを分けて実装 2026/04/17 ---
     def check_for_updates(self):
         """GitHub Releasesから最新バージョンを確認する"""
         def _check():
@@ -263,15 +264,18 @@ class ClipLiteApp:
                 if GITHUB_TOKEN:
                     headers["Authorization"] = f"token {GITHUB_TOKEN}"
 
-                # GitHub APIから最新リリースの情報を取得
-                # [MOD] requests.get に headers 引数を追加 2026/04/17
-                response = requests.get(API_URL, headers=headers, timeout=10)
+                # [ADD] プレリリース許可設定に応じてURLを切り替え 2026/04/17
+                target_url = API_URL_DEV if self.allow_prerelease.get() else API_URL
+
+                response = requests.get(target_url, headers=headers, timeout=10)
                 if response.status_code == 200:
                     data = response.json()
-                    # タグ名（例: v2.5.0）を取得。VERSION変数と比較
-                    v = data.get("tag_name", "").replace("v", "") 
+                    
+                    # [MOD] URLによってレスポンス形式が異なる（DEVはリスト、Latestは辞書）
+                    latest_release = data[0] if isinstance(data, list) else data
+                    v = latest_release.get("tag_name", "").replace("v", "") 
                     self.latest_version_cached = v
-                
+
                     if v > VERSION:
                         last_check_str = self.config.get("last_update_dialog_date", "")
                         today_str = datetime.now().strftime("%Y-%m-%d")
@@ -279,7 +283,6 @@ class ClipLiteApp:
                             # メインスレッドでダイアログを表示
                             self.root.after(0, lambda: self.ask_update_dialog(v, today_str))
                 else:
-                    print(f"[DEBUG] API Error: {response.status_code}")
                     self.latest_version_cached = "Offline"
             except Exception as e:
                 print(f"[DEBUG] Update check failed: {e}")
@@ -297,18 +300,21 @@ class ClipLiteApp:
                 headers["Authorization"] = f"token {GITHUB_TOKEN}"
 
             # 1. 最新リリースの情報を再取得
-            # [MOD] 最新リリース情報の取得に headers を追加
-            response = requests.get(API_URL, headers=headers, timeout=10)
+            # [MOD] 更新実行時も現在の設定に従って最新情報を取得するようにURLを切り替え 2026/04/17
+            target_url = API_URL_DEV if self.allow_prerelease.get() else API_URL
+            response = requests.get(target_url, headers=headers, timeout=10)
             response.raise_for_status()
             data = response.json()
+            # [MOD] URLによってレスポンス形式が異なる（DEVはリスト、Latestは辞書）
+            latest_release = data[0] if isinstance(data, list) else data
         
             # 2. Assetsの中から「.exe」ファイルを探す
             download_url = None
-            for asset in data.get("assets", []):
+            for asset in latest_release.get("assets", []):
                 if asset["name"].endswith(".exe"):
                     download_url = asset["browser_download_url"]
                     break
-        
+
             if not download_url:
                 tk.messagebox.showerror("Error", "リリースにEXEファイルが見つかりません。")
                 return
@@ -385,6 +391,7 @@ class ClipLiteApp:
                 "auto_fallback": self.auto_fallback.get(),
                 "save_interval": self.save_interval.get(),
                 "original_size_mode": self.original_size_mode.get(), # [ADD]
+                "allow_prerelease": self.allow_prerelease.get(), # [ADD]
                 # [ADD] 最後にアップデートダイアログを出した日付を保存
                 "last_update_dialog_date": self.config.get("last_update_dialog_date", "")
             })
@@ -435,7 +442,8 @@ class ClipLiteApp:
             subprocess.Popen(f'explorer "{os.path.normpath(path)}"')
 
     def open_options(self):
-        w, h = 450, 460
+        # プレリリース項目の追加に伴い高さを微調整 (460 -> 490)
+        w, h = 450, 490
         opt_win = tk.Toplevel(self.root)
         opt_win.title("ClipLite Options")
         self.center_window(opt_win, w, h)
@@ -467,6 +475,10 @@ class ClipLiteApp:
         tk.Checkbutton(opt_win, text="Drive未接続時に自動ローカル保存する", variable=self.auto_fallback, 
                        bg=DARK_BG, fg=DARK_FG, selectcolor=STATUS_BG, activebackground=DARK_BG).pack(pady=2)
 
+        # [ADD] プレリリース許可のチェックボックス 2026/04/17
+        tk.Checkbutton(opt_win, text="プレリリース版の更新通知を受け取る", variable=self.allow_prerelease, 
+                       bg=DARK_BG, fg=DARK_FG, selectcolor=STATUS_BG, activebackground=DARK_BG).pack(pady=2)
+
         f_interval = tk.Frame(opt_win, bg=DARK_BG)
         f_interval.pack(pady=10)
         tk.Label(f_interval, text="重複保存を抑制する秒数:", bg=DARK_BG, fg=DARK_FG).pack(side="left")
@@ -491,6 +503,7 @@ class ClipLiteApp:
         btn_save = tk.Button(opt_win, text="設定を保存して閉じる",
                   command=lambda: [
                       self.save_config(),
+                      self.check_for_updates(), # 設定変更後に再チェック
                       opt_win.destroy(),
                       self.hide_window() if self.start_hidden.get() else None
                   ], 
@@ -728,7 +741,6 @@ class ClipLiteApp:
             # スレッドセーフに通知を投げる
             # 通知の中身を msg (保存先情報) だけにしてシンプルに
             self.tray_icon.notify(
-                # f"{msg}",
                 msg,
                 title="ClipLite Pro: Optimized"
             )
