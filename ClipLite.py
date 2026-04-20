@@ -56,8 +56,8 @@ def load_github_token():
     return None
 
 # --- ClipLite 定数・初期設定 ---
-VERSION = "2.4.3"
-AUTHOR_INFO = "neko52tsai@gmail.com"
+VERSION = "2.4.4"
+AUTHOR_INFO = "tasai@lixil.com"
 
 # --- Git定数設定 ---
 GITHUB_USER = "neko34gtr"
@@ -666,12 +666,29 @@ class ClipLiteApp:
         base_dir = self.local_path.get() if mode == "local" else self.gdrive_path.get()
         
         fallback_msg = ""
-        if mode == "gdrive" and not os.path.exists(base_dir):
-            if self.auto_fallback.get():
-                base_dir = self.local_path.get()
-                fallback_msg = " (Fallback to Local)"
+
+        # --- [MOD] 保存先ルートフォルダの存在確認と自動作成 ---
+        if not os.path.exists(base_dir):
+            if mode == "gdrive":
+                # Gドライブのルート（G:）自体が存在するかチェック
+                drive_letter = os.path.splitdrive(base_dir)[0]
+                if os.path.exists(drive_letter):
+                    # ドライブはあるが指定フォルダがない場合は作成
+                    try:
+                        os.makedirs(base_dir, exist_ok=True)
+                    except Exception as e:
+                        print(f"Failed to create G-Drive folder: {e}")
+                elif self.auto_fallback.get():
+                    # ドライブ自体が未マウントならローカルへ逃がす
+                    base_dir = self.local_path.get()
+                    fallback_msg = " (Fallback to Local)"
+                    os.makedirs(base_dir, exist_ok=True) # ローカル側もなければ作成
+                else:
+                    raise FileNotFoundError("Drive not mounted")
             else:
-                raise FileNotFoundError("Drive not mounted")
+                # ローカルパスが存在しない場合は作成
+                os.makedirs(base_dir, exist_ok=True)
+        # -----------------------------------------------------
 
         target_dir = os.path.join(base_dir, date_folder)
         if not os.path.exists(target_dir): os.makedirs(target_dir, exist_ok=True)
