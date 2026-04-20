@@ -357,15 +357,6 @@ class ClipLiteApp:
                 f.write(f'del "{temp_exe}"\n')
                 f.write(f'del "%~f0"\n')
 
-            #with open(batch_path, "w", encoding="shift-jis") as f:
-            #    f.write(f'@echo off\n')
-            #    f.write(f'timeout /t 2 /nobreak > nul\n')
-            #    # temp_exe を dest_exe に上書きコピー
-            #    f.write(f'copy /y "{temp_exe}" "{dest_exe}"\n')
-            #    f.write(f'start "" "{dest_exe}"\n')
-            #    f.write(f'del "{temp_exe}"\n') # 一時ファイル削除
-            #    f.write(f'del "%~f0"\n')
-
             subprocess.Popen([batch_path], shell=True)
             self.quit_app()
 
