@@ -56,7 +56,7 @@ def load_github_token():
     return None
 
 # --- ClipLite 定数・初期設定 ---
-VERSION = "2.4.4"
+VERSION = "2.4.5"
 AUTHOR_INFO = "tasai@lixil.com"
 
 # --- Git定数設定 ---
@@ -341,15 +341,30 @@ class ClipLiteApp:
             dest_exe = sys.executable 
 
             # 5. 自己消滅 & 置換バッチの作成 (既存ロジックを活用)
+            # v2.4.5 バッチ書き出し部分を強化
             batch_path = os.path.join(os.environ['TEMP'], "cliplite_updater.bat")
             with open(batch_path, "w", encoding="shift-jis") as f:
                 f.write(f'@echo off\n')
-                f.write(f'timeout /t 2 /nobreak > nul\n')
-                # temp_exe を dest_exe に上書きコピー
+                f.write(f'echo Updating ClipLite Pro... Please wait.\n')
+                f.write(f'timeout /t 3 /nobreak > nul\n') # 待機時間を3秒に延長
+                # 元のファイルがロックされている間ループして待機
+                f.write(f':retry\n')
+                f.write(f'del /f /q "{dest_exe}" > nul 2>&1\n')
+                f.write(f'if exist "{dest_exe}" (timeout /t 1 > nul & goto retry)\n')
+                # 削除を確認してから最新版をコピー
                 f.write(f'copy /y "{temp_exe}" "{dest_exe}"\n')
                 f.write(f'start "" "{dest_exe}"\n')
-                f.write(f'del "{temp_exe}"\n') # 一時ファイル削除
+                f.write(f'del "{temp_exe}"\n')
                 f.write(f'del "%~f0"\n')
+
+            #with open(batch_path, "w", encoding="shift-jis") as f:
+            #    f.write(f'@echo off\n')
+            #    f.write(f'timeout /t 2 /nobreak > nul\n')
+            #    # temp_exe を dest_exe に上書きコピー
+            #    f.write(f'copy /y "{temp_exe}" "{dest_exe}"\n')
+            #    f.write(f'start "" "{dest_exe}"\n')
+            #    f.write(f'del "{temp_exe}"\n') # 一時ファイル削除
+            #    f.write(f'del "%~f0"\n')
 
             subprocess.Popen([batch_path], shell=True)
             self.quit_app()
