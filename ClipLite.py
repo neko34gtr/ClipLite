@@ -76,7 +76,7 @@ def load_github_token():
     return None
 
 # --- ClipLite 定数・初期設定 ---
-VERSION = "2.4.6"
+VERSION = "2.4.7"
 AUTHOR_INFO = "tasai@lixil.com"
 
 # --- Git定数設定 ---
@@ -324,6 +324,7 @@ class ClipLiteApp:
 
     # --- 自動更新ロジック関数
     # ここがまだ上手く最後まで正常に終わらなかったので、v2.6.5を基準にする必要がある
+    # Python32.dllが見つからないというエラーが治らないので色々試す
     def perform_update(self):
         """最新のEXEをダウンロードして置換を実行する"""
         try:
@@ -362,11 +363,42 @@ class ClipLiteApp:
                 f.write(exe_data.content)
 
             # 4. 現在実行中のパス
-            dest_exe = sys.executable 
+            dest_exe = sys.executable
+
+            # 旧EXEを一時的に逃がす名前
+            old_exe_bak = dest_exe + ".old"
+            batch_path = os.path.join(exe_dir, "cliplite_updater.bat")
 
             # 5. 自己消滅 & 置換バッチの作成 (既存ロジックを活用)
-            # --- [安定化] 徹底的に待機して置換するバッチ --- v2.4.7
-            batch_path = os.path.join(os.environ['TEMP'], "cliplite_updater.bat")
+            with open(batch_path, "w", encoding="shift-jis") as f:
+                f.write('@echo off\n')
+                f.write('timeout /t 2 /nobreak > nul\n')
+                
+                # DLLの参照先が狂わないよう、一時フォルダから完全に離脱
+                f.write('cd /d %~dp0\n') 
+                
+                # 1. まず古いEXEの名前を変えて「使用中」のロックを逃がす
+                f.write(f'if exist "{old_exe_bak}" del /f /q "{old_exe_bak}"\n')
+                f.write(f'ren "{dest_exe}" "{os.path.basename(old_exe_bak)}"\n')
+                
+                # 2. その隙に新しいEXEを本来の名前で配置
+                f.write(f'copy /y "{temp_exe}" "{dest_exe}"\n')
+                
+                # 3. 新しい方を起動（これで _MEI フォルダも新しく作られる）
+                f.write(f'start "" "{dest_exe}"\n')
+                
+                # 4. 後片付け（古いbakは次回の起動時に消すか、ここで少し待って消す）
+                f.write(f'del "{temp_exe}"\n')
+                f.write(f'timeout /t 5 /nobreak > nul\n')
+                f.write(f'del "{old_exe_bak}"\n')
+                f.write(f'del "%~f0" & exit\n')
+
+            # subprocessの起動方法も、より独立性の高い方法へ
+            os.startfile(batch_path)
+            self.quit_app()
+
+            """
+            # --- これは駄目だった --
             with open(batch_path, "w", encoding="shift-jis") as f:
                 f.write(f'@echo off\n')
                 f.write('title ClipLite Update Process\n')
@@ -396,7 +428,7 @@ class ClipLiteApp:
             # バッチを最小化状態で起動し、自分を閉じる
             subprocess.Popen(['cmd', '/c', 'start', '/min', batch_path], shell=True)
             self.quit_app()
-
+            """
         except Exception as e:
             write_log(f"Update Error: {e}\n{traceback.format_exc()}")
             tk.messagebox.showerror("Error", f"アップデート中にエラーが発生しました: {e}")
