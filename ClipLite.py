@@ -353,8 +353,10 @@ class ClipLiteApp:
                 return
 
             # 3. 一時フォルダにダウンロード
-            # [MOD] EXEファイルのダウンロード本体に headers を追加 2026/04/17
-            temp_exe = os.path.join(os.environ['TEMP'], "ClipLite_new.exe")
+            # --- [MOD] ダウンロード先をシステムTEMPからEXEと同じ場所の _update_temp へ変更 ---
+            exe_dir = os.path.dirname(sys.executable) # [ADD] v2.4.7
+            temp_exe = os.path.join(exe_dir, "ClipLite_new.tmp") # [ADD] システムTEMPを使わず、同じドライブ内で処理 v2.6.7
+            #temp_exe = os.path.join(os.environ['TEMP'], "ClipLite_new.exe") # [DEL]
             exe_data = requests.get(download_url, headers=headers, timeout=30)
             with open(temp_exe, "wb") as f:
                 f.write(exe_data.content)
@@ -363,26 +365,40 @@ class ClipLiteApp:
             dest_exe = sys.executable 
 
             # 5. 自己消滅 & 置換バッチの作成 (既存ロジックを活用)
-            # v2.4.5 バッチ書き出し部分を強化
+            # --- [安定化] 徹底的に待機して置換するバッチ --- v2.4.7
             batch_path = os.path.join(os.environ['TEMP'], "cliplite_updater.bat")
             with open(batch_path, "w", encoding="shift-jis") as f:
                 f.write(f'@echo off\n')
-                f.write(f'echo Updating ClipLite Pro... Please wait.\n')
-                f.write(f'timeout /t 3 /nobreak > nul\n') # 待機時間を3秒に延長
+                f.write('title ClipLite Update Process\n')
+                f.write('echo Waiting for application to exit...\n')
+                f.write(f'timeout /t 5 /nobreak > nul\n') # 待機時間を3秒に延長
+
+                # [ADD] DLLエラーを防ぐため、作業ディレクトリをルートに移動 v.2.4.7
+                f.write('cd /d c:\\\n')
+
                 # 元のファイルがロックされている間ループして待機
                 f.write(f':retry\n')
                 f.write(f'del /f /q "{dest_exe}" > nul 2>&1\n')
-                f.write(f'if exist "{dest_exe}" (timeout /t 1 > nul & goto retry)\n')
-                # 削除を確認してから最新版をコピー
-                f.write(f'copy /y "{temp_exe}" "{dest_exe}"\n')
-                f.write(f'start "" "{dest_exe}"\n')
-                f.write(f'del "{temp_exe}"\n')
-                f.write(f'del "%~f0"\n')
+                f.write(f'if exist "{dest_exe}" (\n')
+                f.write('    echo File is locked. Retrying...\n')
+                f.write('    timeout /t 1 > nul\n')
+                f.write('    goto retry\n')
+                f.write(')\n')
 
-            subprocess.Popen([batch_path], shell=True)
+                # 削除を確認してから最新版をコピー
+                f.write(f'copy /y "{temp_exe}" "{dest_exe}" > nul\n')
+                f.write(f'del "{temp_exe}" > nul\n')
+                f.write(f'echo Update Complete. Starting ClipLite...\n')
+                f.write(f'start "" "{dest_exe}"\n')
+                # 自分（バッチ）を消して終了
+                f.write(f'del "%~f0" & exit\n')
+
+            # バッチを最小化状態で起動し、自分を閉じる
+            subprocess.Popen(['cmd', '/c', 'start', '/min', batch_path], shell=True)
             self.quit_app()
 
         except Exception as e:
+            write_log(f"Update Error: {e}\n{traceback.format_exc()}")
             tk.messagebox.showerror("Error", f"アップデート中にエラーが発生しました: {e}")
 
     # アップデートトリガー(ダイアログ版)
