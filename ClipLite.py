@@ -21,6 +21,7 @@ import webbrowser  # メールURL起動用
 import urllib.parse  # URLエンコード用
 import requests  # [ADD] GitHub APIアクセス用
 import gc # [ADD] ガベージコレクションの明示的な呼び出し用
+import traceback  # [ADD] エラーログ詳細出力用
 
 # --- Windowsタスクバー用 ID設定 (Pythonロゴ化を防止) ---
 MY_APP_ID = 'tsai.cliplite.pro.v2' # 任意のユニークな文字列
@@ -37,6 +38,25 @@ def resource_path(relative_path):
     except Exception:
         base_path = os.path.abspath(".")
     return os.path.join(base_path, relative_path)
+
+# --- [ADD] ログ出力関数 2026/04/20 ---
+LOG_FILE = "error.log"
+def write_log(message):
+    """error.log に追記する (スタックトレース対応)"""
+    timestamp = datetime.now().strftime("[%Y-%m-%d %H:%M:%S]")
+    try:
+        with open(LOG_FILE, "a", encoding="utf-8") as f:
+            f.write(f"{timestamp} {message}\n")
+    except:
+        pass
+
+def init_log():
+    """起動時にログファイルを初期化する"""
+    try:
+        with open(LOG_FILE, "w", encoding="utf-8") as f:
+            f.write(f"--- ClipLite Pro Log Started at {datetime.now()} ---\n")
+    except:
+        pass
 
 # [ADD] 外部ファイル .key からトークンを読み込む関数を新規追加 2026/04/17
 def load_github_token():
@@ -56,7 +76,7 @@ def load_github_token():
     return None
 
 # --- ClipLite 定数・初期設定 ---
-VERSION = "2.4.5"
+VERSION = "2.4.6"
 AUTHOR_INFO = "tasai@lixil.com"
 
 # --- Git定数設定 ---
@@ -152,14 +172,15 @@ class ClipLiteApp:
         # デフォルト保存先設定
         default_pictures_path = os.path.join(os.path.expandvars("%USERPROFILE%"), "Pictures", "ClipLite_Exports")
         
-        self.save_mode = tk.StringVar(value=self.config.get("save_mode", "local"))
+        # --- [MOD] デフォルト設定を GDrive/オリジナルサイズ優先に変更 2026/04/20 ---
+        self.save_mode = tk.StringVar(value=self.config.get("save_mode", "gdrive"))
         self.local_path = tk.StringVar(value=self.config.get("local_path", default_pictures_path))
         self.gdrive_path = tk.StringVar(value=self.config.get("gdrive_path", "G:/マイドライブ/images"))
         self.start_hidden = tk.BooleanVar(value=self.config.get("start_hidden", False))
         self.auto_fallback = tk.BooleanVar(value=self.config.get("auto_fallback", True))
         # 重複抑制設定（デフォルト5秒）
         self.save_interval = tk.IntVar(value=self.config.get("save_interval", 5))
-        self.original_size_mode = tk.BooleanVar(value=self.config.get("original_size_mode", False)) # [ADD] オリジナルサイズ優先フラグ
+        self.original_size_mode = tk.BooleanVar(value=self.config.get("original_size_mode", True)) # [ADD] オリジナルサイズ優先フラグ
         self.allow_prerelease = tk.BooleanVar(value=self.config.get("allow_prerelease", False))
         # [ADD] アップデートダイアログの管理用
         # ※これはGUI部品に紐付けないので、通常の辞書操作（self.config）だけでも動きますが、
@@ -257,7 +278,7 @@ class ClipLiteApp:
             self.root.withdraw()
 
     # --- 自動アップデートチェック関数 pre-releaseにも対応出来るようにURLを分けて実装 2026/04/17 ---
-    # ここバグっている
+    # Updateチェックのロジックを大幅に強化し、プレリリース版の管理やエラーハンドリングの改善を実装
     def check_for_updates(self):
         """GitHub Releasesから最新バージョンを確認する"""
         def _check():
@@ -302,6 +323,7 @@ class ClipLiteApp:
         threading.Thread(target=_check, daemon=True).start()
 
     # --- 自動更新ロジック関数
+    # ここがまだ上手く最後まで正常に終わらなかったので、v2.6.5を基準にする必要がある
     def perform_update(self):
         """最新のEXEをダウンロードして置換を実行する"""
         try:
@@ -673,43 +695,36 @@ class ClipLiteApp:
         
         fallback_msg = ""
 
-        # --- [MOD] 保存先ルートフォルダの存在確認と自動作成 ---
-        if not os.path.exists(base_dir):
-            if mode == "gdrive":
-                # Gドライブのルート（G:）自体が存在するかチェック
+        # --- [MOD] フォルダ作成ロジックの強化とログ記録 2026/04/20 ---
+        try:
+            if not os.path.exists(base_dir):
                 drive_letter = os.path.splitdrive(base_dir)[0]
-                if os.path.exists(drive_letter):
-                    # ドライブはあるが指定フォルダがない場合は作成
-                    try:
-                        os.makedirs(base_dir, exist_ok=True)
-                    except Exception as e:
-                        print(f"Failed to create G-Drive folder: {e}")
+                if os.path.exists(drive_letter + "\\") or drive_letter == "":
+                    os.makedirs(base_dir, exist_ok=True)
+                    # 作成できたか再確認
+                    if not os.path.exists(base_dir):
+                        raise OSError(f"Failed to create directory after makedirs: {base_dir}")
                 elif self.auto_fallback.get():
-                    # ドライブ自体が未マウントならローカルへ逃がす
+                    write_log(f"GDrive not mounted ({drive_letter}). Falling back to local.")
                     base_dir = self.local_path.get()
                     fallback_msg = " (Fallback to Local)"
-                    os.makedirs(base_dir, exist_ok=True) # ローカル側もなければ作成
+                    os.makedirs(base_dir, exist_ok=True)
                 else:
-                    raise FileNotFoundError("Drive not mounted")
-            else:
-                # ローカルパスが存在しない場合は作成
-                os.makedirs(base_dir, exist_ok=True)
-        # -----------------------------------------------------
+                    raise FileNotFoundError(f"Target drive/path not found: {base_dir}")
+            
+            target_dir = os.path.join(base_dir, date_folder)
+            if not os.path.exists(target_dir):
+                os.makedirs(target_dir, exist_ok=True)
+        except Exception as e:
+            write_log(f"Directory creation error: {e}\n{traceback.format_exc()}")
+            raise
 
-        target_dir = os.path.join(base_dir, date_folder)
-        if not os.path.exists(target_dir): os.makedirs(target_dir, exist_ok=True)
         save_path = os.path.join(target_dir, file_name)
-
-        # [ADD] カラープロファイルの抽出
-        # クリップボードデータにプロファイルが含まれている場合はそれを保持する
         icc = img.info.get("icc_profile")
-
-        # [MOD] 画質重視のエンコード設定に変更（プロファイル対応版）
-        # プロファイルが存在する場合のみ icc_profile を指定して色味を維持
         if icc:
-            img.save(save_path, "WEBP", quality=WEBP_QUALITY, method=WEBP_METHOD, icc_profile=icc) # [MOD]
+            img.save(save_path, "WEBP", quality=WEBP_QUALITY, method=WEBP_METHOD, icc_profile=icc)
         else:
-            img.save(save_path, "WEBP", quality=WEBP_QUALITY, method=WEBP_METHOD) # [MOD]
+            img.save(save_path, "WEBP", quality=WEBP_QUALITY, method=WEBP_METHOD)
 
         self.last_save_time = current_time_val
         return save_path, fallback_msg
@@ -725,11 +740,9 @@ class ClipLiteApp:
                     if not self.original_size_mode.get(): # [ADD] 分岐追加
                         # 4K(3840px)以上のソース時はしきい値を1920pxに引き上げ、それ以外は1200pxとする
                         current_limit = 1920 if img.width >= 3840 else 1200 # [MOD]
-                        
                         if img.width > current_limit:
                             ratio = current_limit / img.width
                             img = img.resize((current_limit, int(img.height * ratio)), Image.Resampling.LANCZOS)
-                    # [ADD] else時（ONの時）は、ここをスキップしてオリジナルのまま次へ進む
 
                     saved_path, fallback_msg = self.save_webp_file(img)
 
@@ -886,6 +899,7 @@ def is_already_running():
     return False
 
 if __name__ == "__main__":
+    init_log() # [ADD] ログの初期化
     if is_already_running(): sys.exit(0)
     root = tk.Tk()
     app = ClipLiteApp(root)
