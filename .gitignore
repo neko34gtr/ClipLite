@@ -19,6 +19,7 @@ dist/
 ## システムが作るゴミ
 Thumbs.db
 desktop.ini
+error.log
 /新規 テキスト ドキュメント.txt
 
 # プログラムの設定ファイル
