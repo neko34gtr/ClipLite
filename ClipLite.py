@@ -50,6 +50,25 @@ def write_log(message):
     except:
         pass
 
+#アップデートを即時適用では無く、再起動時に実施させる
+def apply_update_if_exists():
+    """起動時に .update ファイルがあれば自分を差し替える"""
+    exe_path = sys.executable
+    update_file = exe_path + ".update"
+    
+    if os.path.exists(update_file):
+        # バッチを作って自分を消して .update を自分にリネームして起動
+        batch_path = os.path.join(os.path.dirname(exe_path), "apply_update.bat")
+        with open(batch_path, "w", encoding="shift-jis") as f:
+            f.write(f'@echo off\n')
+            f.write(f'timeout /t 1 /nobreak > nul\n')
+            f.write(f'move /y "{update_file}" "{exe_path}"\n') # .update を本番EXEに上書き
+            f.write(f'start "" "{exe_path}"\n')
+            f.write(f'del "%~f0"\n')
+        
+        subprocess.Popen(['cmd', '/c', batch_path], shell=True)
+        os._exit(0) # 即座に終了してバッチに任せる
+
 def init_log():
     """起動時にログファイルを初期化する"""
     try:
@@ -323,115 +342,31 @@ class ClipLiteApp:
         threading.Thread(target=_check, daemon=True).start()
 
     # --- 自動更新ロジック関数
-    # ここがまだ上手く最後まで正常に終わらなかったので、v2.6.5を基準にする必要がある
-    # Python32.dllが見つからないというエラーが治らないので色々試す
     def perform_update(self):
-        """最新のEXEをダウンロードして置換を実行する"""
+        """[安定版] 次回起動時に更新を予約するロジック"""
         try:
-            # [ADD] 認証ヘッダーの準備 2026/04/17
             headers = {}
-            if GITHUB_TOKEN:
-                headers["Authorization"] = f"token {GITHUB_TOKEN}"
+            if GITHUB_TOKEN: headers["Authorization"] = f"token {GITHUB_TOKEN}"
 
-            # 1. 最新リリースの情報を再取得
-            # [MOD] 更新実行時も現在の設定に従って最新情報を取得するようにURLを切り替え 2026/04/17
             target_url = API_URL_DEV if self.allow_prerelease.get() else API_URL
             response = requests.get(target_url, headers=headers, timeout=10)
-            response.raise_for_status()
             data = response.json()
-            # [MOD] URLによってレスポンス形式が異なる（DEVはリスト、Latestは辞書）
             latest_release = data[0] if isinstance(data, list) else data
         
-            # 2. Assetsの中から「.exe」ファイルを探す
-            download_url = None
-            for asset in latest_release.get("assets", []):
-                if asset["name"].endswith(".exe"):
-                    download_url = asset["browser_download_url"]
-                    break
+            download_url = next(a["browser_download_url"] for a in latest_release.get("assets", []) if a["name"].endswith(".exe"))
 
-            if not download_url:
-                tk.messagebox.showerror("Error", "リリースにEXEファイルが見つかりません。")
-                return
-
-            # 3. 一時フォルダにダウンロード
-            # --- [MOD] ダウンロード先をシステムTEMPからEXEと同じ場所の _update_temp へ変更 ---
-            exe_dir = os.path.dirname(sys.executable) # [ADD] v2.4.7
-            temp_exe = os.path.join(exe_dir, "ClipLite_new.tmp") # [ADD] システムTEMPを使わず、同じドライブ内で処理 v2.6.7
-            #temp_exe = os.path.join(os.environ['TEMP'], "ClipLite_new.exe") # [DEL]
+            # EXEと同じ場所に .update という拡張子で保存（実行ファイルではないのでロックされない）
+            dest_exe = sys.executable
+            update_pending_file = dest_exe + ".update"
+            
             exe_data = requests.get(download_url, headers=headers, timeout=30)
-            with open(temp_exe, "wb") as f:
+            with open(update_pending_file, "wb") as f:
                 f.write(exe_data.content)
 
-            # 4. 現在実行中のパス
-            dest_exe = sys.executable
-
-            # 旧EXEを一時的に逃がす名前
-            old_exe_bak = dest_exe + ".old"
-            batch_path = os.path.join(exe_dir, "cliplite_updater.bat")
-
-            # 5. 自己消滅 & 置換バッチの作成 (既存ロジックを活用)
-            with open(batch_path, "w", encoding="shift-jis") as f:
-                f.write('@echo off\n')
-                f.write('timeout /t 2 /nobreak > nul\n')
-                
-                # DLLの参照先が狂わないよう、一時フォルダから完全に離脱
-                f.write('cd /d %~dp0\n') 
-                
-                # 1. まず古いEXEの名前を変えて「使用中」のロックを逃がす
-                f.write(f'if exist "{old_exe_bak}" del /f /q "{old_exe_bak}"\n')
-                f.write(f'ren "{dest_exe}" "{os.path.basename(old_exe_bak)}"\n')
-                
-                # 2. その隙に新しいEXEを本来の名前で配置
-                f.write(f'copy /y "{temp_exe}" "{dest_exe}"\n')
-                
-                # 3. 新しい方を起動（これで _MEI フォルダも新しく作られる）
-                f.write(f'start "" "{dest_exe}"\n')
-                
-                # 4. 後片付け（古いbakは次回の起動時に消すか、ここで少し待って消す）
-                f.write(f'del "{temp_exe}"\n')
-                f.write(f'timeout /t 5 /nobreak > nul\n')
-                f.write(f'del "{old_exe_bak}"\n')
-                f.write(f'del "%~f0" & exit\n')
-
-            # subprocessの起動方法も、より独立性の高い方法へ
-            os.startfile(batch_path)
-            self.quit_app()
-
-            """
-            # --- これは駄目だった --
-            with open(batch_path, "w", encoding="shift-jis") as f:
-                f.write(f'@echo off\n')
-                f.write('title ClipLite Update Process\n')
-                f.write('echo Waiting for application to exit...\n')
-                f.write(f'timeout /t 5 /nobreak > nul\n') # 待機時間を3秒に延長
-
-                # [ADD] DLLエラーを防ぐため、作業ディレクトリをルートに移動 v.2.4.7
-                f.write('cd /d c:\\\n')
-
-                # 元のファイルがロックされている間ループして待機
-                f.write(f':retry\n')
-                f.write(f'del /f /q "{dest_exe}" > nul 2>&1\n')
-                f.write(f'if exist "{dest_exe}" (\n')
-                f.write('    echo File is locked. Retrying...\n')
-                f.write('    timeout /t 1 > nul\n')
-                f.write('    goto retry\n')
-                f.write(')\n')
-
-                # 削除を確認してから最新版をコピー
-                f.write(f'copy /y "{temp_exe}" "{dest_exe}" > nul\n')
-                f.write(f'del "{temp_exe}" > nul\n')
-                f.write(f'echo Update Complete. Starting ClipLite...\n')
-                f.write(f'start "" "{dest_exe}"\n')
-                # 自分（バッチ）を消して終了
-                f.write(f'del "%~f0" & exit\n')
-
-            # バッチを最小化状態で起動し、自分を閉じる
-            subprocess.Popen(['cmd', '/c', 'start', '/min', batch_path], shell=True)
-            self.quit_app()
-            """
+            tk.messagebox.showinfo("Update", "アップデートの準備が整いました。\n次回のPC起動時に最新版に更新されます。")
+            
         except Exception as e:
-            write_log(f"Update Error: {e}\n{traceback.format_exc()}")
-            tk.messagebox.showerror("Error", f"アップデート中にエラーが発生しました: {e}")
+            tk.messagebox.showerror("Error", f"準備に失敗しました: {e}")
 
     # アップデートトリガー(ダイアログ版)
     def ask_update_dialog(self, new_ver, today_str):
@@ -947,6 +882,7 @@ def is_already_running():
     return False
 
 if __name__ == "__main__":
+    apply_update_if_exists() # 起動の最優先でチェック
     init_log() # [ADD] ログの初期化
     if is_already_running(): sys.exit(0)
     root = tk.Tk()
