@@ -76,7 +76,7 @@ def load_github_token():
     return None
 
 # --- ClipLite 定数・初期設定 ---
-VERSION = "2.4.8"
+VERSION = "2.4.9"
 AUTHOR_INFO = "tasai@lixil.com"
 
 # --- Git定数設定 ---
@@ -186,6 +186,7 @@ class ClipLiteApp:
         # 重複抑制設定（デフォルト5秒）
         self.save_interval = tk.IntVar(value=self.config.get("save_interval", 5))
         self.original_size_mode = tk.BooleanVar(value=self.config.get("original_size_mode", True)) # [ADD] オリジナルサイズ優先フラグ
+        self.resize_threshold = tk.IntVar(value=self.config.get("resize_threshold", 1200)) # [ADD] リサイズの閾値（幅）を設定可能
         self.allow_prerelease = tk.BooleanVar(value=self.config.get("allow_prerelease", False))
         # [ADD] アップデートダイアログの管理用
         # ※これはGUI部品に紐付けないので、通常の辞書操作（self.config）だけでも動きますが、
@@ -444,6 +445,7 @@ class ClipLiteApp:
                 "auto_fallback": self.auto_fallback.get(),
                 "save_interval": self.save_interval.get(),
                 "original_size_mode": self.original_size_mode.get(), # [ADD]
+                "resize_threshold": max(1200, self.resize_threshold.get()), #[ADD] 最低値を1200に設定してリサイズの暴走を防止
                 "allow_prerelease": self.allow_prerelease.get(), # [ADD]
                 # [ADD] 最後にアップデートダイアログを出した日付を保存
                 "last_update_dialog_date": self.config.get("last_update_dialog_date", "")
@@ -495,8 +497,8 @@ class ClipLiteApp:
             subprocess.Popen(f'explorer "{os.path.normpath(path)}"')
 
     def open_options(self):
-        # Option画面の高さを微調整 (460 -> 490 -> 600)
-        w, h = 450, 600
+        # Option画面の高さを微調整 (460 -> 490 -> 600 -> 650)
+        w, h = 450, 650
         opt_win = tk.Toplevel(self.root)
         opt_win.title("ClipLite Options")
         self.center_window(opt_win, w, h)
@@ -539,7 +541,13 @@ class ClipLiteApp:
         for fmt in SAVE_FORMATS:
             tk.Radiobutton(f_format, text=fmt.upper(), variable=self.save_format, value=fmt, 
                            bg=DARK_BG, fg=DARK_FG, selectcolor=STATUS_BG).pack(side="left", padx=5)
-        # ----------------------------------
+        # [ADD] リサイズ幅設定
+        tk.Label(opt_win, text="リサイズ上限幅 (最低1200px):", bg=DARK_BG, fg="#888888").pack(anchor="w", padx=30, pady=(10,0))
+        f_resize = tk.Frame(opt_win, bg=DARK_BG)
+        f_resize.pack(fill="x", padx=30)
+        sp_resize = tk.Spinbox(f_resize, from_=1200, to=3840, increment=100, textvariable=self.resize_threshold, width=10, bg=STATUS_BG, fg=DARK_FG, insertbackground=DARK_FG, relief="flat")
+        sp_resize.pack(side="left")
+        tk.Label(f_resize, text=" px", bg=DARK_BG, fg=DARK_FG).pack(side="left")
 
         f_interval = tk.Frame(opt_win, bg=DARK_BG)
         f_interval.pack(pady=10)
@@ -794,11 +802,18 @@ class ClipLiteApp:
                     # [MOD] リサイズ判定ロジック
                     # オリジナルサイズモードがOFFの場合のみリサイズを実行
                     if not self.original_size_mode.get(): # [ADD] 分岐追加
+                        # [MOD] 固定値(1920/1200)をユーザー設定値に変更
+                        user_limit = max(1200, self.resize_threshold.get())
+                        if img.width > user_limit:
+                            ratio = user_limit / img.width
+                            img = img.resize((user_limit, int(img.height * ratio)), Image.Resampling.LANCZOS)
+                        
+                        # 旧リサイズロジック（4K以上は1920、それ以外は1200） - 現在はユーザー設定値に統一されているためコメントアウト
                         # 4K(3840px)以上のソース時はしきい値を1920pxに引き上げ、それ以外は1200pxとする
-                        current_limit = 1920 if img.width >= 3840 else 1200 # [MOD]
-                        if img.width > current_limit:
-                            ratio = current_limit / img.width
-                            img = img.resize((current_limit, int(img.height * ratio)), Image.Resampling.LANCZOS)
+                        #current_limit = 1920 if img.width >= 3840 else 1200 # [MOD]
+                        #if img.width > current_limit:
+                        #    ratio = current_limit / img.width
+                        #    img = img.resize((current_limit, int(img.height * ratio)), Image.Resampling.LANCZOS)ろっ
 
                     saved_path, fallback_msg = self.save_webp_file(img)
 
