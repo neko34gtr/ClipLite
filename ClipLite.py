@@ -76,7 +76,7 @@ def load_github_token():
     return None
 
 # --- ClipLite 定数・初期設定 ---
-VERSION = "2.4.7"
+VERSION = "2.4.8"
 AUTHOR_INFO = "tasai@lixil.com"
 
 # --- Git定数設定 ---
@@ -110,6 +110,9 @@ MAX_WIDTH = 1200
 MAX_WIDTH_4K = 1920  # [ADD] 4K以上のソース時に許容する幅（フルHDサイズ）
 WEBP_QUALITY = 82    # [ADD] 画質設定をわずかに向上（デフォルト80→82）
 WEBP_METHOD = 6      # [ADD] 最高品質の圧縮アルゴリズム（画質とファイルサイズのバランスを最適化）
+
+# --- [ADD] 拡張子ごとの保存オプション設定 ---
+SAVE_FORMATS = ["webp", "jpg", "png", "avif"]
 
 DARK_BG = "#1e1e1e"
 DARK_FG = "#ffffff"
@@ -174,6 +177,8 @@ class ClipLiteApp:
         
         # --- [MOD] デフォルト設定を GDrive/オリジナルサイズ優先に変更 2026/04/20 ---
         self.save_mode = tk.StringVar(value=self.config.get("save_mode", "gdrive"))
+        # --- [MOD] 保存形式用変数の初期化 ---
+        self.save_format = tk.StringVar(value=self.config.get("save_format", "webp")) # デフォルトwebp
         self.local_path = tk.StringVar(value=self.config.get("local_path", default_pictures_path))
         self.gdrive_path = tk.StringVar(value=self.config.get("gdrive_path", "G:/マイドライブ/images"))
         self.start_hidden = tk.BooleanVar(value=self.config.get("start_hidden", False))
@@ -432,6 +437,7 @@ class ClipLiteApp:
                 "pos_x": int(parts[2]),
                 "pos_y": int(parts[3]),
                 "save_mode": self.save_mode.get(),
+                "save_format": self.save_format.get(), # 追加 設定保存処理の更新
                 "local_path": self.local_path.get(),
                 "gdrive_path": self.gdrive_path.get(),
                 "start_hidden": self.start_hidden.get(),
@@ -489,8 +495,8 @@ class ClipLiteApp:
             subprocess.Popen(f'explorer "{os.path.normpath(path)}"')
 
     def open_options(self):
-        # プレリリース項目の追加に伴い高さを微調整 (460 -> 490)
-        w, h = 450, 520
+        # Option画面の高さを微調整 (460 -> 490 -> 600)
+        w, h = 450, 600
         opt_win = tk.Toplevel(self.root)
         opt_win.title("ClipLite Options")
         self.center_window(opt_win, w, h)
@@ -525,6 +531,15 @@ class ClipLiteApp:
         # [ADD] プレリリース許可のチェックボックス 2026/04/17
         tk.Checkbutton(opt_win, text="プレリリース版の更新通知を受け取る", variable=self.allow_prerelease, 
                        bg=DARK_BG, fg=DARK_FG, selectcolor=STATUS_BG, activebackground=DARK_BG).pack(pady=2)
+
+        # --- [ADD] 保存形式選択UIの追加 ---
+        tk.Label(opt_win, text="保存ファイル形式:", bg=DARK_BG, fg="#888888").pack(anchor="w", padx=30, pady=(10,0))
+        f_format = tk.Frame(opt_win, bg=DARK_BG)
+        f_format.pack(fill="x", padx=30)
+        for fmt in SAVE_FORMATS:
+            tk.Radiobutton(f_format, text=fmt.upper(), variable=self.save_format, value=fmt, 
+                           bg=DARK_BG, fg=DARK_FG, selectcolor=STATUS_BG).pack(side="left", padx=5)
+        # ----------------------------------
 
         f_interval = tk.Frame(opt_win, bg=DARK_BG)
         f_interval.pack(pady=10)
@@ -688,14 +703,17 @@ class ClipLiteApp:
 
         date_folder = now.strftime("%Y%m%d")
 
+        # --- [MOD] ユーザー選択の拡張子を取得 ---
+        ext = self.save_format.get()
+
         # --- [MOD] ファイル名生成ロジックの変更 --- 2024/04/17
         if "original_filename" in img.info:
-            # ドラッグ&ドロップ時：元ファイル名 + mmddhhmmss.webp
+            # ドラッグ&ドロップ時：元ファイル名 + mmddhhmmss.選択拡張子
             time_suffix = now.strftime("%m%d%H%M%S")
-            file_name = f"{img.info['original_filename']}_{time_suffix}.webp"
+            file_name = f"{img.info['original_filename']}_{time_suffix}.{ext}"
         else:
-            # クリップボード監視時：clip_+mmddhhmmss.webp
-            file_name = now.strftime("clip_%m%d%H%M%S.webp")
+            # クリップボード監視時：clip_+mmddhhmmss.選択拡張子
+            file_name = now.strftime(f"clip_%m%d%H%M%S.{ext}")
         # -----------------------------------------
 
         mode = self.save_mode.get()
@@ -728,11 +746,41 @@ class ClipLiteApp:
             raise
 
         save_path = os.path.join(target_dir, file_name)
-        icc = img.info.get("icc_profile")
-        if icc:
-            img.save(save_path, "WEBP", quality=WEBP_QUALITY, method=WEBP_METHOD, icc_profile=icc)
-        else:
-            img.save(save_path, "WEBP", quality=WEBP_QUALITY, method=WEBP_METHOD)
+
+        # --- [MOD] 形式ごとの保存ロジック分岐 ---
+        try:
+            save_params = {}
+            if ext == "webp":
+                save_params = {"quality": WEBP_QUALITY, "method": WEBP_METHOD}
+                fmt_type = "WEBP"
+            elif ext == "jpg":
+                if img.mode != "RGB": img = img.convert("RGB")
+                save_params = {"quality": 90, "optimize": True}
+                fmt_type = "JPEG"
+            elif ext == "png":
+                save_params = {"optimize": True}
+                fmt_type = "PNG"
+            elif ext == "avif":
+                # pillow-avif-pluginが必要。未導入時は通知。
+                fmt_type = "AVIF"
+                save_params = {"speed": 6}
+
+            icc = img.info.get("icc_profile")
+            if icc: save_params["icc_profile"] = icc
+            
+            img.save(save_path, fmt_type, **save_params)
+        except Exception as e:
+            write_log(f"Save Error ({ext}): {e}")
+            raise
+
+        # 旧セーブロジック（WebP固定、ICCプロファイルの有無で分岐） - 現在は上記の新ロジックに統合されているためコメントアウト
+        # ----------------------------------------
+        #icc = img.info.get("icc_profile")
+        #if icc:
+        #    img.save(save_path, "WEBP", quality=WEBP_QUALITY, method=WEBP_METHOD, icc_profile=icc)
+        #else:
+        #    img.save(save_path, "WEBP", quality=WEBP_QUALITY, method=WEBP_METHOD)
+        #
 
         self.last_save_time = current_time_val
         return save_path, fallback_msg
@@ -773,7 +821,8 @@ class ClipLiteApp:
                     finally: win32clipboard.CloseClipboard()
 
                     if saved_path:
-                        msg = f"Archived in {self.save_mode.get().upper()}{fallback_msg}"
+                        ext_label = self.save_format.get().upper()
+                        msg = f"Archived as {ext_label} in {self.save_mode.get().upper()}{fallback_msg}"
                     else:
                         msg = f"Optimized only{fallback_msg}"
                     
