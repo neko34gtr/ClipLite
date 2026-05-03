@@ -22,6 +22,7 @@ import urllib.parse  # URLエンコード用
 import requests  # [ADD] GitHub APIアクセス用
 import gc # [ADD] ガベージコレクションの明示的な呼び出し用
 import traceback  # [ADD] エラーログ詳細出力用
+import zipfile # [ADD] Googleフォトダウンロードファイルの展開
 
 # --- Windowsタスクバー用 ID設定 (Pythonロゴ化を防止) ---
 MY_APP_ID = 'tsai.cliplite.pro.v2' # 任意のユニークな文字列
@@ -41,6 +42,7 @@ def resource_path(relative_path):
 
 # --- [ADD] ログ出力関数 2026/04/20 ---
 LOG_FILE = "error.log"
+SAVE_LOG = "save.log"
 def write_log(message):
     """error.log に追記する (スタックトレース対応)"""
     timestamp = datetime.now().strftime("[%Y-%m-%d %H:%M:%S]")
@@ -50,11 +52,21 @@ def write_log(message):
     except:
         pass
 
+def write_save_log(message):
+    timestamp = datetime.now().strftime("[%Y-%m-%d %H:%M:%S]")
+    try:
+        with open(SAVE_LOG, "a", encoding="utf-8") as f:
+            f.write(f"{timestamp} {message}\n")
+    except:
+        pass
+
 def init_log():
     """起動時にログファイルを初期化する"""
     try:
-        with open(LOG_FILE, "w", encoding="utf-8") as f:
-            f.write(f"--- ClipLite Pro Log Started at {datetime.now()} ---\n")
+        for f_path in [LOG_FILE, SAVE_LOG]:
+            if not os.path.exists(f_path):
+                with open(f_path, "w", encoding="utf-8") as f:
+                    f.write(f"--- Log Started at {datetime.now()} ---\n")
     except:
         pass
 
@@ -76,7 +88,7 @@ def load_github_token():
     return None
 
 # --- ClipLite 定数・初期設定 ---
-VERSION = "2.4.9"
+VERSION = "2.5.0"
 AUTHOR_INFO = "tasai@lixil.com"
 
 # --- Git定数設定 ---
@@ -188,9 +200,7 @@ class ClipLiteApp:
         self.original_size_mode = tk.BooleanVar(value=self.config.get("original_size_mode", True)) # [ADD] オリジナルサイズ優先フラグ
         self.resize_threshold = tk.IntVar(value=self.config.get("resize_threshold", 1200)) # [ADD] リサイズの閾値（幅）を設定可能
         self.allow_prerelease = tk.BooleanVar(value=self.config.get("allow_prerelease", False))
-        # [ADD] アップデートダイアログの管理用
-        # ※これはGUI部品に紐付けないので、通常の辞書操作（self.config）だけでも動きますが、
-        # 構造を明示的にするためにここで初期値を確定させておくと安全です。
+        
         if "last_update_dialog_date" not in self.config:
             self.config["last_update_dialog_date"] = ""
 
@@ -210,8 +220,7 @@ class ClipLiteApp:
         def get_colored_icon(b64_data, color_rgb):
             img_bytes = base64.b64decode(b64_data)
             img = Image.open(BytesIO(img_bytes)).convert("RGBA")
-            # data = img.getdata() 2027/10に廃止予定のため下記コードへ修正
-            # 新しい関数があれば使い、なければ古い方を使う
+            # Pillow 10.x以降を見据えた修正
             data = img.get_flattened_data() if hasattr(img, 'get_flattened_data') else img.getdata()
             new_data = []
             for item in data:
@@ -275,40 +284,29 @@ class ClipLiteApp:
         threading.Thread(target=self.monitor_loop, daemon=True).start()
         threading.Thread(target=self.worker_loop, daemon=True).start()
 
-        # 起動プロセスの最後にチェックを開始
         self.setup_tray()
-        # アップデートを確認
-        self.check_for_updates() # [ADD]
+        self.check_for_updates()
 
         if self.start_hidden.get():
             self.root.withdraw()
 
-    # --- 自動アップデートチェック関数 pre-releaseにも対応出来るようにURLを分けて実装 2026/04/17 ---
-    # Updateチェックのロジックを大幅に強化し、プレリリース版の管理やエラーハンドリングの改善を実装
+    # --- 自動アップデートチェック関数 ---
     def check_for_updates(self):
         """GitHub Releasesから最新バージョンを確認する"""
         def _check():
             try:
-                # [ADD] 認証ヘッダーの準備 2026/04/17
                 headers = {}
-                # アップデートチェックをする瞬間にファイルを確認し、確実性を高めた
                 token = load_github_token()
                 if token:
                    headers["Authorization"] = f"token {token}"
 
-                # [ADD] プレリリース許可設定に応じてURLを切り替え 2026/04/17
                 target_url = API_URL_DEV if self.allow_prerelease.get() else API_URL
-
                 response = requests.get(target_url, headers=headers, timeout=10)
                 if response.status_code == 200:
                     data = response.json()
-
-                    # [MOD] レスポンス形式の判定を厳密化
                     if isinstance(data, list):
-                        # API_URL_DEV (releases) の場合はリストの先頭が最新
                         latest_release = data[0] if len(data) > 0 else {}
                     else:
-                        # API_URL (latest) の場合は辞書がそのまま返る
                         latest_release = data
                     
                     v = latest_release.get("tag_name", "").replace("v", "") 
@@ -318,93 +316,66 @@ class ClipLiteApp:
                         last_check_str = self.config.get("last_update_dialog_date", "")
                         today_str = datetime.now().strftime("%Y-%m-%d")
                         if last_check_str != today_str:
-                            # メインスレッドでダイアログを表示
                             self.root.after(0, lambda: self.ask_update_dialog(v, today_str))
                 else:
                     self.latest_version_cached = "Offline"
             except Exception as e:
-                print(f"[DEBUG] Update check failed: {e}")
                 self.latest_version_cached = "Error"
 
         threading.Thread(target=_check, daemon=True).start()
 
-    # --- 自動更新ロジック関数
     def perform_update(self):
-        """
-        [最終安定版] Windowsタスク経由で親子関係を断絶し、10秒の猶予を持って置換する
-        """
+        """[最終安定版] Windowsタスク経由で置換する"""
         try:
-            # 1. 認証情報の準備
             headers = {}
             if GITHUB_TOKEN: headers["Authorization"] = f"token {GITHUB_TOKEN}"
 
-            # 2. 最新情報の取得
             target_url = API_URL_DEV if self.allow_prerelease.get() else API_URL
             response = requests.get(target_url, headers=headers, timeout=10)
             data = response.json()
             latest_release = data[0] if isinstance(data, list) else data
             download_url = next(a["browser_download_url"] for a in latest_release.get("assets", []) if a["name"].endswith(".exe"))
 
-            # 3. 保存パスの設定
             exe_dir = os.path.dirname(sys.executable)
             dest_exe = sys.executable
             temp_exe = os.path.join(exe_dir, "ClipLite_new.tmp")
             
-            # 4. ダウンロード
             exe_data = requests.get(download_url, headers=headers, timeout=30)
             with open(temp_exe, "wb") as f: f.write(exe_data.content)
 
-            # 5. 【重要】バッチファイルの作成 (10秒待機 & 強力リトライ)
             batch_path = os.path.join(exe_dir, "final_updater.bat")
             with open(batch_path, "w", encoding="shift-jis") as f:
                 f.write('@echo off\n')
                 f.write('title ClipLite Secure Updater\n')
-                # 本体が終了し、OSがDLLロックを解除するのをじっくり待つ
                 f.write('echo Waiting for process cleanup (10s)...\n')
                 f.write('timeout /t 10 /nobreak > nul\n')
-                
                 f.write(':retry\n')
                 f.write('echo Attempting to replace executable...\n')
-                # 旧本体を削除（読み取り専用属性も無視して強制削除）
                 f.write(f'del /f /q "{dest_exe}" > nul 2>&1\n')
-                
-                # まだ消せていなければ、ロックが解除されるまで1秒おきにリトライ
                 f.write(f'if exist "{dest_exe}" (\n')
                 f.write('    echo File still locked. Retrying in 1s...\n')
                 f.write('    timeout /t 1 > nul\n')
                 f.write('    goto retry\n')
                 f.write(')\n')
-                
-                # 置換と起動
                 f.write(f'move /y "{temp_exe}" "{dest_exe}" > nul\n')
                 f.write('echo Update successful. Restarting...\n')
                 f.write(f'start "" "{dest_exe}"\n')
-                
-                # タスクの削除と自分自身の消去
                 f.write('schtasks /delete /tn "ClipLiteUpdate" /f > nul 2>&1\n')
                 f.write(f'del "%~f0" & exit\n')
 
-            # 6. タスクスケジューラへの登録（親子関係の切断）
             task_name = "ClipLiteUpdate"
             subprocess.run(f'schtasks /delete /tn "{task_name}" /f', capture_output=True, shell=True)
-            # 即時実行用のダミータスク登録
             subprocess.run(f'schtasks /create /tn "{task_name}" /tr "\'{batch_path}\'" /sc once /st 00:00 /f', capture_output=True, shell=True)
-            # 外部プロセスとして実行
             subprocess.run(f'schtasks /run /tn "{task_name}"', capture_output=True, shell=True)
-
-            # 7. 即座に完全終了
             os._exit(0)
-
         except Exception as e:
             write_log(f"Final Secure Update Error: {e}")
             tk.messagebox.showerror("Error", "アップデートの準備中に問題が発生しました。")
 
-    # アップデートトリガー(ダイアログ版)
     def ask_update_dialog(self, new_ver, today_str):
         if tk.messagebox.askyesno("Update Available", f"最新版 v{new_ver} が見つかりました。\n今すぐアップデートしますか？"):
             self.perform_update()
         else:
-            # 「いいえ」の場合、今日の日付を記録して今日はもう出さないようにする
             self.config["last_update_dialog_date"] = today_str
             self.save_config()
 
@@ -414,9 +385,7 @@ class ClipLiteApp:
         y = widget.winfo_rooty() + (widget.winfo_height() // 2)
         ctypes.windll.user32.SetCursorPos(x, y)
 
-
     def center_window(self, window, width, height):
-        """ウィンドウをスクリーン中央に配置"""
         screen_width = window.winfo_screenwidth()
         screen_height = window.winfo_screenheight()
         x = (screen_width // 2) - (width // 2)
@@ -438,16 +407,15 @@ class ClipLiteApp:
                 "pos_x": int(parts[2]),
                 "pos_y": int(parts[3]),
                 "save_mode": self.save_mode.get(),
-                "save_format": self.save_format.get(), # 追加 設定保存処理の更新
+                "save_format": self.save_format.get(),
                 "local_path": self.local_path.get(),
                 "gdrive_path": self.gdrive_path.get(),
                 "start_hidden": self.start_hidden.get(),
                 "auto_fallback": self.auto_fallback.get(),
                 "save_interval": self.save_interval.get(),
-                "original_size_mode": self.original_size_mode.get(), # [ADD]
-                "resize_threshold": max(1200, self.resize_threshold.get()), #[ADD] 最低値を1200に設定してリサイズの暴走を防止
-                "allow_prerelease": self.allow_prerelease.get(), # [ADD]
-                # [ADD] 最後にアップデートダイアログを出した日付を保存
+                "original_size_mode": self.original_size_mode.get(),
+                "resize_threshold": max(1200, self.resize_threshold.get()),
+                "allow_prerelease": self.allow_prerelease.get(),
                 "last_update_dialog_date": self.config.get("last_update_dialog_date", "")
             })
             with open(CONFIG_FILE, "w", encoding="utf-8") as f:
@@ -488,7 +456,6 @@ class ClipLiteApp:
             except: return False
 
     def open_current_storage(self):
-        """現在有効な保存先フォルダをエクスプローラーで開く"""
         mode = self.save_mode.get()
         path = self.local_path.get() if mode == "local" else self.gdrive_path.get()
         if mode == "gdrive" and not os.path.exists(path) and self.auto_fallback.get():
@@ -497,7 +464,6 @@ class ClipLiteApp:
             subprocess.Popen(f'explorer "{os.path.normpath(path)}"')
 
     def open_options(self):
-        # Option画面の高さを微調整 (460 -> 490 -> 600 -> 650)
         w, h = 450, 650
         opt_win = tk.Toplevel(self.root)
         opt_win.title("ClipLite Options")
@@ -523,25 +489,22 @@ class ClipLiteApp:
         tk.Checkbutton(opt_win, text="起動時にウィンドウを表示しない", variable=self.start_hidden, 
                        bg=DARK_BG, fg=DARK_FG, selectcolor=STATUS_BG, activebackground=DARK_BG).pack(pady=5)
 
-        # [ADD] リサイズ無効化オプションの追加
         tk.Checkbutton(opt_win, text="オリジナルサイズで保存（リサイズを無効化）", variable=self.original_size_mode, 
                        bg=DARK_BG, fg=DARK_FG, selectcolor=STATUS_BG, activebackground=DARK_BG).pack(pady=5)
 
         tk.Checkbutton(opt_win, text="Drive未接続時に自動ローカル保存する", variable=self.auto_fallback, 
                        bg=DARK_BG, fg=DARK_FG, selectcolor=STATUS_BG, activebackground=DARK_BG).pack(pady=2)
 
-        # [ADD] プレリリース許可のチェックボックス 2026/04/17
         tk.Checkbutton(opt_win, text="プレリリース版の更新通知を受け取る", variable=self.allow_prerelease, 
                        bg=DARK_BG, fg=DARK_FG, selectcolor=STATUS_BG, activebackground=DARK_BG).pack(pady=2)
 
-        # --- [ADD] 保存形式選択UIの追加 ---
         tk.Label(opt_win, text="保存ファイル形式:", bg=DARK_BG, fg="#888888").pack(anchor="w", padx=30, pady=(10,0))
         f_format = tk.Frame(opt_win, bg=DARK_BG)
         f_format.pack(fill="x", padx=30)
         for fmt in SAVE_FORMATS:
             tk.Radiobutton(f_format, text=fmt.upper(), variable=self.save_format, value=fmt, 
                            bg=DARK_BG, fg=DARK_FG, selectcolor=STATUS_BG).pack(side="left", padx=5)
-        # [ADD] リサイズ幅設定
+
         tk.Label(opt_win, text="リサイズ上限幅 (最低1200px):", bg=DARK_BG, fg="#888888").pack(anchor="w", padx=30, pady=(10,0))
         f_resize = tk.Frame(opt_win, bg=DARK_BG)
         f_resize.pack(fill="x", padx=30)
@@ -573,7 +536,7 @@ class ClipLiteApp:
         btn_save = tk.Button(opt_win, text="設定を保存して閉じる",
                   command=lambda: [
                       self.save_config(),
-                      self.check_for_updates(), # 設定変更後に再チェック
+                      self.check_for_updates(),
                       opt_win.destroy(),
                       self.hide_window() if self.start_hidden.get() else None
                   ], 
@@ -587,15 +550,11 @@ class ClipLiteApp:
         path = filedialog.askdirectory(initialdir=initial_dir)
         if path: var.set(path)
 
-
     def setup_tray(self):
-        # トレイアイコン画像に作成したアイコンを適用
         try:
-            # PILで開き、サイズをリサイズしてトレイ用に最適化して読み込む
             icon_raw = Image.open(resource_path(ICON_FILE))
             icon_img = icon_raw.resize((64, 64), Image.Resampling.LANCZOS)
         except:
-            # 失敗時のフォールバック
             icon_img = Image.new('RGB', (64, 64), color=(0, 120, 212))
 
         menu = (
@@ -609,8 +568,7 @@ class ClipLiteApp:
         threading.Thread(target=self.tray_icon.run, daemon=True).start()
 
     def show_help(self):
-        # バージョン表示を追加するため、高さを少し広げる (310 -> 330)
-        w, h = 350, 330 # [MOD]
+        w, h = 350, 330
         help_win = tk.Toplevel(self.root)
         help_win.title("About")
         self.center_window(help_win, w, h)
@@ -618,20 +576,17 @@ class ClipLiteApp:
         help_win.attributes("-topmost", True)
         self.set_dark_title_bar(help_win)
 
-        # 1. アプリ名 (中央) pady=(20, 15)) 15→0
         tk.Label(help_win, text=f"ClipLite Pro v{VERSION}", font=("Segoe UI", 10, "bold"), 
                  bg=DARK_BG, fg=DARK_FG).pack(pady=(20, 0))
 
-        # --- [ADD] アップデートステータスの表示 ---
         status_text = "Checking for updates..."
-        status_fg = "#555555" # [MOD] 少し暗めのグレーにして目立たなくする #888888→#555555
+        status_fg = "#555555"
         
         if self.latest_version_cached:
             if self.latest_version_cached in ["Error", "Offline"]:
                 status_text = "Update check failed (Offline)"
                 status_fg = "#888888"
             elif self.latest_version_cached and self.latest_version_cached > VERSION:
-                # アップデートがある場合のみ「更新ボタン」を表示
                 btn_update = tk.Button(help_win, text=f"v{self.latest_version_cached} へ更新", 
                                    command=self.perform_update,
                                    bg=ACCENT_COLOR, fg=DARK_FG, relief="flat", padx=10)
@@ -644,13 +599,11 @@ class ClipLiteApp:
                 
         tk.Label(help_win, text=status_text, font=("Segoe UI", 8), 
                  bg=DARK_BG, fg=status_fg).pack(pady=(2, 10))
-        # ----------------------------------------
 
-        # 2. 機能説明 (中央寄りの左揃え / padx=40 で位置を調整)
         help_text = (
             "【主な機能】\n"
             "● 自動最適化・軽量化\n"
-            "   画像を1200pxにリサイズし、256色へ軽量化。\n"
+            "   画像を指定幅にリサイズし、256色へ軽量化。\n"
             "● 自動WebPアーカイブ\n"
             "   履歴ファイルをGoogle Drive等へ自動保存。\n"
             "● 重複保存抑制機能\n"
@@ -661,26 +614,20 @@ class ClipLiteApp:
         tk.Label(help_win, text=help_text, font=("Segoe UI", 9), 
                  bg=DARK_BG, fg=DARK_FG, justify="left").pack(padx=40, anchor="w")
 
-        # 3. 開発者情報の横並びフレーム (左端の位置を本文と合わせて padx=40)
         author_frame = tk.Frame(help_win, bg=DARK_BG)
         author_frame.pack(anchor="w", padx=40, pady=(20, 0))
 
         tk.Label(author_frame, text="開発者：", font=("Segoe UI", 9), 
                  bg=DARK_BG, fg=DARK_FG).pack(side="left")
 
-        # クリッカブルなメールアドレス
         email_label = tk.Label(author_frame, text=AUTHOR_INFO, font=("Segoe UI", 9, "underline"), 
                                bg=DARK_BG, fg=ACCENT_COLOR, cursor="hand2")
         email_label.pack(side="left")
-        # webbrowser モジュールを使用したURL起動 
         email_label.bind("<Button-1>", lambda e: webbrowser.open(SUPPORT_URL))
 
-        # 4. 閉じるボタン
         btn_close = tk.Button(help_win, text="閉じる", command=help_win.destroy, 
                               bg=STATUS_BG, fg=DARK_FG, relief="flat", padx=20)
         btn_close.pack(pady=20)
-        
-        # マウスカーソルをボタンへ自動移動
         help_win.after(100, lambda: self.move_mouse_to_widget(btn_close))
 
     def hide_window(self):
@@ -692,106 +639,52 @@ class ClipLiteApp:
         self.root.after(10, self.root.focus_force)
 
     def quit_app(self):
-        # 設定を保存
         self.save_config()
-        # トレイアイコンの停止
         if hasattr(self, 'tray_icon'):
             self.tray_icon.stop()
-        # メインループ(mainloop)を終了させる
         self.root.after(0, self.root.quit)
 
-    # WebPの保存パラメータに、最高品質の圧縮アルゴリズム（method=6）を指定します。
-    def save_webp_file(self, img):
+    def save_image_file(self, img):
         now = datetime.now()
         current_time_val = time.time()
-        
-        # 重複抑制チェック
-        if current_time_val - self.last_save_time < self.save_interval.get():
+        is_from_clipboard = "original_filename" not in img.info
+        if is_from_clipboard and (current_time_val - self.last_save_time < self.save_interval.get()):
             return None, " (Suppressed)"
-
-        date_folder = now.strftime("%Y%m%d")
-
-        # --- [MOD] ユーザー選択の拡張子を取得 ---
+        
         ext = self.save_format.get()
-
-        # --- [MOD] ファイル名生成ロジックの変更 --- 2024/04/17
-        if "original_filename" in img.info:
-            # ドラッグ&ドロップ時：元ファイル名 + mmddhhmmss.選択拡張子
-            time_suffix = now.strftime("%m%d%H%M%S")
-            file_name = f"{img.info['original_filename']}_{time_suffix}.{ext}"
-        else:
-            # クリップボード監視時：clip_+mmddhhmmss.選択拡張子
-            file_name = now.strftime(f"clip_%m%d%H%M%S.{ext}")
-        # -----------------------------------------
+        date_folder = now.strftime("%Y%m%d")
+        base_name_val = img.info.get('original_filename', 'clip')
+        file_name = "{}_{}.{}".format(base_name_val, now.strftime("%m%d%H%M%S%f")[:-3], ext)
 
         mode = self.save_mode.get()
         base_dir = self.local_path.get() if mode == "local" else self.gdrive_path.get()
-        
         fallback_msg = ""
-
-        # --- [MOD] フォルダ作成ロジックの強化とログ記録 2026/04/20 ---
         try:
             if not os.path.exists(base_dir):
-                drive_letter = os.path.splitdrive(base_dir)[0]
-                if os.path.exists(drive_letter + "\\") or drive_letter == "":
-                    os.makedirs(base_dir, exist_ok=True)
-                    # 作成できたか再確認
-                    if not os.path.exists(base_dir):
-                        raise OSError(f"Failed to create directory after makedirs: {base_dir}")
-                elif self.auto_fallback.get():
-                    write_log(f"GDrive not mounted ({drive_letter}). Falling back to local.")
-                    base_dir = self.local_path.get()
-                    fallback_msg = " (Fallback to Local)"
-                    os.makedirs(base_dir, exist_ok=True)
-                else:
-                    raise FileNotFoundError(f"Target drive/path not found: {base_dir}")
-            
+                if self.auto_fallback.get():
+                    base_dir = self.local_path.get(); fallback_msg = " (Fallback)"
+                os.makedirs(base_dir, exist_ok=True)
             target_dir = os.path.join(base_dir, date_folder)
-            if not os.path.exists(target_dir):
-                os.makedirs(target_dir, exist_ok=True)
-        except Exception as e:
-            write_log(f"Directory creation error: {e}\n{traceback.format_exc()}")
-            raise
-
-        save_path = os.path.join(target_dir, file_name)
-
-        # --- [MOD] 形式ごとの保存ロジック分岐 ---
-        try:
+            os.makedirs(target_dir, exist_ok=True)
+            save_path = os.path.join(target_dir, file_name)
+            
             save_params = {}
-            if ext == "webp":
-                save_params = {"quality": WEBP_QUALITY, "method": WEBP_METHOD}
-                fmt_type = "WEBP"
-            elif ext == "jpg":
-                if img.mode != "RGB": img = img.convert("RGB")
-                save_params = {"quality": 90, "optimize": True}
-                fmt_type = "JPEG"
-            elif ext == "png":
-                save_params = {"optimize": True}
-                fmt_type = "PNG"
-            elif ext == "avif":
-                # pillow-avif-pluginが必要。未導入時は通知。
-                fmt_type = "AVIF"
-                save_params = {"speed": 6}
+            fmt_type = ext.upper().replace("JPG", "JPEG")
+            if ext == "webp": save_params = {"quality": WEBP_QUALITY, "method": WEBP_METHOD}
+            elif ext == "jpg": (img := img.convert("RGB")); save_params = {"quality": 90, "optimize": True}
+            elif ext == "avif": save_params = {"speed": 6}
 
             icc = img.info.get("icc_profile")
             if icc: save_params["icc_profile"] = icc
-            
             img.save(save_path, fmt_type, **save_params)
+            
+            self.last_save_time = current_time_val
+            write_save_log(f"SUCCESS: Saved to {save_path}")
+            return save_path, fallback_msg
         except Exception as e:
-            write_log(f"Save Error ({ext}): {e}")
+            write_log(f"Save Error ({file_name}): {traceback.format_exc()}")
+            write_save_log(f"ERROR: Failed to save {file_name}")
             raise
-
-        # 旧セーブロジック（WebP固定、ICCプロファイルの有無で分岐） - 現在は上記の新ロジックに統合されているためコメントアウト
-        # ----------------------------------------
-        #icc = img.info.get("icc_profile")
-        #if icc:
-        #    img.save(save_path, "WEBP", quality=WEBP_QUALITY, method=WEBP_METHOD, icc_profile=icc)
-        #else:
-        #    img.save(save_path, "WEBP", quality=WEBP_QUALITY, method=WEBP_METHOD)
-        #
-
-        self.last_save_time = current_time_val
-        return save_path, fallback_msg
 
     def worker_loop(self):
         while True:
@@ -799,30 +692,17 @@ class ClipLiteApp:
             if img is None: break
             with self.processing_lock:
                 try:
-                    # [MOD] リサイズ判定ロジック
-                    # オリジナルサイズモードがOFFの場合のみリサイズを実行
-                    if not self.original_size_mode.get(): # [ADD] 分岐追加
-                        # [MOD] 固定値(1920/1200)をユーザー設定値に変更
+                    if not self.original_size_mode.get():
                         user_limit = max(1200, self.resize_threshold.get())
                         if img.width > user_limit:
                             ratio = user_limit / img.width
                             img = img.resize((user_limit, int(img.height * ratio)), Image.Resampling.LANCZOS)
                         
-                        # 旧リサイズロジック（4K以上は1920、それ以外は1200） - 現在はユーザー設定値に統一されているためコメントアウト
-                        # 4K(3840px)以上のソース時はしきい値を1920pxに引き上げ、それ以外は1200pxとする
-                        #current_limit = 1920 if img.width >= 3840 else 1200 # [MOD]
-                        #if img.width > current_limit:
-                        #    ratio = current_limit / img.width
-                        #    img = img.resize((current_limit, int(img.height * ratio)), Image.Resampling.LANCZOS)ろっ
+                    saved_path, fallback_msg = self.save_image_file(img)
 
-                    saved_path, fallback_msg = self.save_webp_file(img)
-
-                    # --- [ADD] 保存処理が終わったら、名前情報を破棄して初期化する --- 2026/04/17
                     if "original_filename" in img.info:
                         del img.info["original_filename"]
-                    # ----------------------------------------------------------
 
-                    # クリップボード書き戻し処理
                     img_p = img.convert("P", palette=Image.ADAPTIVE, colors=256).convert("RGB")
                     output = BytesIO()
                     img_p.save(output, "BMP")
@@ -842,42 +722,25 @@ class ClipLiteApp:
                         msg = f"Optimized only{fallback_msg}"
                     
                     self.root.after(0, lambda m=msg: self.update_ui_success(m))
-
-                    # [MOD] ハッシュ値の更新（メモリ負荷を抑えるため、全体を展開せず極小サイズで計算）
-                    # 以前のコード：self.last_hash = hash(img_p.tobytes()[:1024])
                     self.last_hash = hash(img_p.resize((8, 8), resample=Image.Resampling.NEAREST).tobytes())
                 except Exception as e:
                     error_txt = "Drive Error" if "Drive not mounted" in str(e) else "Processing Error"
                     self.root.after(0, lambda t=error_txt: self.update_ui_error(t))
-
                 finally:
-                    # [MOD] img_p と img の両方を確実に閉じてメモリを解放する
                     if 'img_p' in locals() and img_p:
                         img_p.close()
                     if 'img' in locals() and img:
                         img.close()
-                    gc.collect()    # 未使用メモリを即座に回収
-                #finally:
-                #    # [ADD] 処理が終わった画像オブジェクトを確実に閉じる
-                #    if img:
-                #        img.close()
+                    gc.collect()
             self.task_queue.task_done()
 
     def update_ui_success(self, msg):
-        # メインウィンドウの表示更新
         self.status_frame.configure(bg=ACCENT_COLOR)
         self.status_label.configure(bg=ACCENT_COLOR, fg=DARK_FG, text="COMPLETE")
         self.info_label.config(text=msg, fg=ACCENT_COLOR)
 
-        # --- ウィンドウが非表示の時のみ通知を表示 ---
         if self.start_hidden.get() and hasattr(self, 'tray_icon'):
-            # スレッドセーフに通知を投げる
-            # 通知の中身を msg (保存先情報) だけにしてシンプルに
-            self.tray_icon.notify(
-                msg,
-                title="ClipLite Pro: Optimized"
-            )
-        # ----------------------------------------------
+            self.tray_icon.notify(msg, title="ClipLite Pro: Optimized")
 
         self.root.after(2000, self.reset_status)
 
@@ -890,74 +753,83 @@ class ClipLiteApp:
         self.status_frame.configure(bg=STATUS_BG)
         self.status_label.configure(bg=STATUS_BG, fg="#aaaaaa", text="Monitoring Active")
 
-    # --- ドロップファイル処理関数 ---
     def on_drop(self, filenames):
-        for fname in filenames:
-            path = fname.decode('utf-8', errors='ignore')
-            if path.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.webp')):
-                try:
-                    # [MOD] copy()はメタデータが落ちる可能性があるため、そのまま開いて渡す
-                    # img = Image.open(path).copy() [ORG]
-                    img = Image.open(path)
-                    img.load()  # [ADD] ファイルを閉じる前にピクセルデータをメモリにロード
+        def process_files():
+            for fname in filenames:
+                path = fname.decode('utf-8', errors='ignore')
+                if path.lower().endswith('.zip'):
+                    self.process_zip_file(path)
+                elif path.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.webp')):
+                    self.load_and_enqueue(path)
+        threading.Thread(target=process_files, daemon=True).start()
 
-                    # --- [ADD] 元のファイル名を保持 --- 2026/04/17
-                    base_name = os.path.splitext(os.path.basename(path))[0]
-                    img.info["original_filename"] = base_name
-                    # ----------------------------------
+    # --- ZIP解凍および内部ファイルのスキャン機能(安定化) ---
+    def process_zip_file(self, zip_path):
+        write_save_log(f"Starting ZIP extraction: {zip_path}")
+        count = 0
+        try:
+            with zipfile.ZipFile(zip_path, 'r') as z:
+                target_files = [f for f in z.infolist() if not f.is_dir() and f.filename.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.webp'))]
+                write_save_log(f"Found {len(target_files)} images in ZIP")
 
-                    # ★修正ポイント：ハッシュ値をリセットして確実に変換を走らせる
-                    self.last_hash = None
-                    self.task_queue.put(img) # [MOD] ロード済みオブジェクトを渡す
-                except Exception as e:
-                    pass
-                break
+                for file_info in target_files:
+                    try:
+                        with z.open(file_info) as f:
+                            img_data = BytesIO(f.read())
+                            img = Image.open(img_data)
+                            img.load()
+                            base_name = os.path.splitext(os.path.basename(file_info.filename))[0]
+                            img.info["original_filename"] = base_name
+                            self.last_hash = None 
+                            self.task_queue.put(img)
+                            count += 1
+                    except Exception as e:
+                        write_log(f"Zip extract item error ({file_info.filename}): {traceback.format_exc()}")
+            write_save_log(f"ZIP processing finished: {count} items enqueued")
+        except Exception as e:
+            write_log(f"Zip open error: {e}")
+            self.root.after(0, lambda: self.update_ui_error("Zip Error"))
+
+    def load_and_enqueue(self, path):
+        try:
+            img = Image.open(path)
+            img.load()
+            img.info["original_filename"] = os.path.splitext(os.path.basename(path))[0]
+            self.last_hash = None
+            self.task_queue.put(img)
+        except Exception as e:
+            write_log(f"Load error ({path}): {e}")
 
     def monitor_loop(self):
         while True:
             try:
-                # キューが空の時のみ監視を行う
                 if self.task_queue.empty():
-                    # クリップボードが開けるかチェック
                     try:
-                        # win32clipboardを使って直接DIB形式を確認する
                         win32clipboard.OpenClipboard()
                         is_image = win32clipboard.IsClipboardFormatAvailable(win32clipboard.CF_DIB)
                         win32clipboard.CloseClipboard()
                     except:
-                        # 他のアプリ（フォト等）がロックしている場合はスキップして次へ
                         is_image = False
 
                     if is_image:
-                        # フォトやSnipping Toolの書き込み完了、通知オフによる遅延を考慮し、リトライを10回(最大1秒間)に強化
                         img = None
                         for _ in range(10):
-                            # ImageGrabはCF_DIBがあれば画像として取得を試みる
                             img = ImageGrab.grabclipboard()
                             if img is not None:
                                 break
-                            time.sleep(0.1) # 0.1秒待って再試行
+                            time.sleep(0.1)
 
                         if isinstance(img, Image.Image):
-                            # アルファチャンネル(RGBA)があるとハッシュ計算や変換で
-                            # 稀にコケるため、RGBに変換して扱うのが安全
                             if img.mode != 'RGB':
                                 img = img.convert('RGB')
-                            # --- [ADD] クリップボード由来であることを保証するため、名前情報を初期化 ---
                             if hasattr(img, "info") and "original_filename" in img.info:
                                 del img.info["original_filename"]
-                            # ------------------------------------------------------------------
 
-                            # [MOD] ハッシュ計算を軽量化
-                            #curr_hash = hash(img.tobytes()[:1024])
                             curr_hash = hash(img.resize((8, 8), resample=Image.Resampling.NEAREST).tobytes())
-                                                            
                             if curr_hash != self.last_hash:
                                 self.task_queue.put(img.copy())
-                                # last_hashの更新はworker_loopに任せるかここで行う
             except Exception as e:
                 pass
-            # 監視頻度を1.2秒→1.0秒に。Snipping Toolの着弾を逃さない設定
             time.sleep(1.0)
 
 def is_already_running():
@@ -971,11 +843,9 @@ def is_already_running():
     return False
 
 if __name__ == "__main__":
-    init_log() # [ADD] ログの初期化
+    init_log()
     if is_already_running(): sys.exit(0)
     root = tk.Tk()
     app = ClipLiteApp(root)
     root.mainloop()
-
-    # mainloop終了後にクリーンにプロセスを落とす
     sys.exit(0)
