@@ -325,49 +325,78 @@ class ClipLiteApp:
         threading.Thread(target=_check, daemon=True).start()
 
     def perform_update(self):
-        """[最終安定版] Windowsタスク経由で置換する"""
+        """[最終安定版] Windowsタスク経由で親子関係を断絶し、10秒の猶予を持って置換する"""
         try:
+            # 1. 実行ドライブの空き容量チェック (40MB)
+            import shutil
+            exe_dir = os.path.dirname(os.path.abspath(sys.executable))
+            usage = shutil.disk_usage(exe_dir)
+            # 40MB = 40 * 1024 * 1024 bytes
+            if usage.free < (40 * 1024 * 1024):
+                write_log(f"Update Aborted: Low disk space ({usage.free} bytes)")
+                tk.messagebox.showwarning(
+                    "空き容量不足", 
+                    f"アップデートに必要な空き容量がありません。\n"
+                    f"実行ドライブに40MB以上の空きを確保してください。\n"
+                    f"(現在の空き: {usage.free // (1024*1024)}MB)"
+                )
+                return
+            # 2. 認証情報の準備
             headers = {}
             if GITHUB_TOKEN: headers["Authorization"] = f"token {GITHUB_TOKEN}"
 
+            # 3. 最新情報の取得
             target_url = API_URL_DEV if self.allow_prerelease.get() else API_URL
             response = requests.get(target_url, headers=headers, timeout=10)
             data = response.json()
             latest_release = data[0] if isinstance(data, list) else data
             download_url = next(a["browser_download_url"] for a in latest_release.get("assets", []) if a["name"].endswith(".exe"))
 
+            # 4. 保存パスの設定
             exe_dir = os.path.dirname(sys.executable)
             dest_exe = sys.executable
             temp_exe = os.path.join(exe_dir, "ClipLite_new.tmp")
             
+            # 5. ダウンロード
             exe_data = requests.get(download_url, headers=headers, timeout=30)
             with open(temp_exe, "wb") as f: f.write(exe_data.content)
 
+            # 6. 【重要】バッチファイルの作成 (10秒待機 & 強力リトライ)
             batch_path = os.path.join(exe_dir, "final_updater.bat")
             with open(batch_path, "w", encoding="shift-jis") as f:
                 f.write('@echo off\n')
                 f.write('title ClipLite Secure Updater\n')
+                # 本体が終了し、OSがDLLロックを解除するのをじっくり待つ
                 f.write('echo Waiting for process cleanup (10s)...\n')
                 f.write('timeout /t 10 /nobreak > nul\n')
                 f.write(':retry\n')
                 f.write('echo Attempting to replace executable...\n')
+                # 旧本体を削除（読み取り専用属性も無視して強制削除）
                 f.write(f'del /f /q "{dest_exe}" > nul 2>&1\n')
+                # まだ消せていなければ、ロックが解除されるまで1秒おきにリトライ
                 f.write(f'if exist "{dest_exe}" (\n')
                 f.write('    echo File still locked. Retrying in 1s...\n')
                 f.write('    timeout /t 1 > nul\n')
                 f.write('    goto retry\n')
                 f.write(')\n')
+                # 置換と起動
                 f.write(f'move /y "{temp_exe}" "{dest_exe}" > nul\n')
                 f.write('echo Update successful. Restarting...\n')
                 f.write(f'start "" "{dest_exe}"\n')
+                # タスクの削除と自分自身の消去
                 f.write('schtasks /delete /tn "ClipLiteUpdate" /f > nul 2>&1\n')
                 f.write(f'del "%~f0" & exit\n')
 
+            # 7. タスクスケジューラへの登録（親子関係の切断）
             task_name = "ClipLiteUpdate"
             subprocess.run(f'schtasks /delete /tn "{task_name}" /f', capture_output=True, shell=True)
+            # 即時実行用のダミータスク登録
             subprocess.run(f'schtasks /create /tn "{task_name}" /tr "\'{batch_path}\'" /sc once /st 00:00 /f', capture_output=True, shell=True)
+            # 外部プロセスとして実行
             subprocess.run(f'schtasks /run /tn "{task_name}"', capture_output=True, shell=True)
+            # 8. 即座に完全終了
             os._exit(0)
+
         except Exception as e:
             write_log(f"Final Secure Update Error: {e}")
             tk.messagebox.showerror("Error", "アップデートの準備中に問題が発生しました。")
