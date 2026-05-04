@@ -88,7 +88,7 @@ def load_github_token():
     return None
 
 # --- ClipLite 定数・初期設定 ---
-VERSION = "2.5.0"
+VERSION = "2.5.1"
 AUTHOR_INFO = "tasai@lixil.com"
 
 # --- Git定数設定 ---
@@ -197,10 +197,14 @@ class ClipLiteApp:
         self.auto_fallback = tk.BooleanVar(value=self.config.get("auto_fallback", True))
         # 重複抑制設定（デフォルト5秒）
         self.save_interval = tk.IntVar(value=self.config.get("save_interval", 5))
-        self.original_size_mode = tk.BooleanVar(value=self.config.get("original_size_mode", True)) # [ADD] オリジナルサイズ優先フラグ
-        self.resize_threshold = tk.IntVar(value=self.config.get("resize_threshold", 1200)) # [ADD] リサイズの閾値（幅）を設定可能
+
+        self.original_size_mode = tk.BooleanVar(value=self.config.get("original_size_mode", True)) # オリジナルサイズ優先フラグ
+        self.resize_threshold = tk.IntVar(value=self.config.get("resize_threshold", 1200))         # 2kまでのリサイズの閾値（幅）を設定可能
+        self.resize_threshold_4k = tk.IntVar(value=self.config.get("resize_threshold_4k", 1920))   # 4kまでのリサイズの閾値（幅）を設定可能
         self.allow_prerelease = tk.BooleanVar(value=self.config.get("allow_prerelease", False))
-        
+        # モード変更を監視してグレーアウトを制御
+        self.original_size_mode.trace_add("write", lambda *args: self.update_ui_state())
+
         if "last_update_dialog_date" not in self.config:
             self.config["last_update_dialog_date"] = ""
 
@@ -437,7 +441,8 @@ class ClipLiteApp:
                 "auto_fallback": self.auto_fallback.get(),
                 "save_interval": self.save_interval.get(),
                 "original_size_mode": self.original_size_mode.get(),
-                "resize_threshold": max(1200, self.resize_threshold.get()),
+                "resize_threshold": self.resize_threshold.get(),
+                "resize_threshold_4k": self.resize_threshold_4k.get(),
                 "allow_prerelease": self.allow_prerelease.get(),
                 "last_update_dialog_date": self.config.get("last_update_dialog_date", "")
             })
@@ -486,8 +491,14 @@ class ClipLiteApp:
         if os.path.exists(path):
             subprocess.Popen(f'explorer "{os.path.normpath(path)}"')
 
+    def update_ui_state(self):
+        """オリジナルサイズモードに応じてSpinboxの有効・無効を切り替え"""
+        state = "disabled" if self.original_size_mode.get() else "normal"
+        if hasattr(self, 'sp_resize_2k'): self.sp_resize_2k.config(state=state)
+        if hasattr(self, 'sp_resize_4k'): self.sp_resize_4k.config(state=state)
+
     def open_options(self):
-        w, h = 450, 650
+        w, h = 450, 680
         opt_win = tk.Toplevel(self.root)
         opt_win.title("ClipLite Options")
         self.center_window(opt_win, w, h)
@@ -528,12 +539,32 @@ class ClipLiteApp:
             tk.Radiobutton(f_format, text=fmt.upper(), variable=self.save_format, value=fmt, 
                            bg=DARK_BG, fg=DARK_FG, selectcolor=STATUS_BG).pack(side="left", padx=5)
 
-        tk.Label(opt_win, text="リサイズ上限幅 (最低1200px):", bg=DARK_BG, fg="#888888").pack(anchor="w", padx=30, pady=(10,0))
-        f_resize = tk.Frame(opt_win, bg=DARK_BG)
-        f_resize.pack(fill="x", padx=30)
-        sp_resize = tk.Spinbox(f_resize, from_=1200, to=3840, increment=100, textvariable=self.resize_threshold, width=10, bg=STATUS_BG, fg=DARK_FG, insertbackground=DARK_FG, relief="flat")
-        sp_resize.pack(side="left")
-        tk.Label(f_resize, text=" px", bg=DARK_BG, fg=DARK_FG).pack(side="left")
+        #tk.Label(opt_win, text="リサイズ上限幅 (最低1200px):", bg=DARK_BG, fg="#888888").pack(anchor="w", padx=30, pady=(10,0))
+        #f_resize = tk.Frame(opt_win, bg=DARK_BG)
+        #f_resize.pack(fill="x", padx=30)
+        #sp_resize = tk.Spinbox(f_resize, from_=1200, to=3840, increment=100, textvariable=self.resize_threshold, width=10, bg=STATUS_BG, fg=DARK_FG, insertbackground=DARK_FG, relief="flat")
+        #sp_resize.pack(side="left")
+        #tk.Label(f_resize, text=" px", bg=DARK_BG, fg=DARK_FG).pack(side="left")
+
+        # 2K用設定 2026/05/04 ADD
+        tk.Label(opt_win, text="2K以下ソースの上限幅 (1200px～):", bg=DARK_BG, fg="#888888").pack(anchor="w", padx=30, pady=(10,0))
+        f_resize_2k = tk.Frame(opt_win, bg=DARK_BG)
+        f_resize_2k.pack(fill="x", padx=30)
+        self.sp_resize_2k = tk.Spinbox(f_resize_2k, from_=1200, to=2560, increment=100, textvariable=self.resize_threshold, 
+                                       width=10, bg=STATUS_BG, fg=DARK_FG, insertbackground=DARK_FG, relief="flat")
+        self.sp_resize_2k.pack(side="left")
+        tk.Label(f_resize_2k, text=" px", bg=DARK_BG, fg=DARK_FG).pack(side="left")
+
+        # 4K用設定 2026/05/04 ADD
+        tk.Label(opt_win, text="4K以上ソースの上限幅 (1920px～):", bg=DARK_BG, fg="#888888").pack(anchor="w", padx=30, pady=(5,0))
+        f_resize_4k = tk.Frame(opt_win, bg=DARK_BG)
+        f_resize_4k.pack(fill="x", padx=30)
+        self.sp_resize_4k = tk.Spinbox(f_resize_4k, from_=1920, to=3840, increment=100, textvariable=self.resize_threshold_4k, 
+                                       width=10, bg=STATUS_BG, fg=DARK_FG, insertbackground=DARK_FG, relief="flat")
+        self.sp_resize_4k.pack(side="left")
+        tk.Label(f_resize_4k, text=" px", bg=DARK_BG, fg=DARK_FG).pack(side="left")
+
+        self.update_ui_state()
 
         f_interval = tk.Frame(opt_win, bg=DARK_BG)
         f_interval.pack(pady=10)
@@ -715,12 +746,26 @@ class ClipLiteApp:
             if img is None: break
             with self.processing_lock:
                 try:
+                    #if not self.original_size_mode.get():
+                    #    user_limit = max(1200, self.resize_threshold.get())
+                    #    if img.width > user_limit:
+                    #        ratio = user_limit / img.width
+                    #        img = img.resize((user_limit, int(img.height * ratio)), Image.Resampling.LANCZOS)
+                    # オリジナルサイズにチェックがあればリサイズ処理全体をスキップ
                     if not self.original_size_mode.get():
-                        user_limit = max(1200, self.resize_threshold.get())
-                        if img.width > user_limit:
-                            ratio = user_limit / img.width
-                            img = img.resize((user_limit, int(img.height * ratio)), Image.Resampling.LANCZOS)
+                        # ソースの幅によって、使用する設定（変数）を自動で切り替え
+                        if img.width >= 3840:
+                            # 4Kソース時は 4K用設定を使用
+                            limit = self.resize_threshold_4k.get()
+                        else:
+                            # それ以外（2K以下）は 通常設定を使用
+                            limit = self.resize_threshold.get()
                         
+                        # 画像が設定された閾値を超えている場合のみリサイズ実行
+                        if img.width > limit:
+                            ratio = limit / img.width
+                            img = img.resize((limit, int(img.height * ratio)), Image.Resampling.LANCZOS)
+
                     saved_path, fallback_msg = self.save_image_file(img)
 
                     if "original_filename" in img.info:
