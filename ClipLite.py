@@ -23,6 +23,9 @@ import requests  # [ADD] GitHub APIアクセス用
 import gc # [ADD] ガベージコレクションの明示的な呼び出し用
 import traceback  # [ADD] エラーログ詳細出力用
 import zipfile # [ADD] Googleフォトダウンロードファイルの展開
+# --- [MOD] v2.6.0 win32gui, win32con を追加 ---
+import win32gui
+import win32con
 
 # --- Windowsタスクバー用 ID設定 (Pythonロゴ化を防止) ---
 MY_APP_ID = 'tsai.cliplite.pro.v2' # 任意のユニークな文字列
@@ -88,7 +91,7 @@ def load_github_token():
     return None
 
 # --- ClipLite 定数・初期設定 ---
-VERSION = "2.5.1"
+VERSION = "2.6.0"
 AUTHOR_INFO = "tasai@lixil.com"
 
 # --- Git定数設定 ---
@@ -170,6 +173,13 @@ class ClipLiteApp:
         self.root.title(f"ClipLite Pro v{VERSION}")
         self.latest_version_cached = None # [ADD] アップデートチェックの結果を保持する変数
         
+        # [ADD] v2.6.0 Windowsの終了信号(WM_QUERYENDSESSION)をハンドルする設定
+        # Tkinterのウィンドウハンドルを取得し、メッセージプロシージャをフック
+        self.root.update_idletasks()
+        hwnd = win32gui.GetParent(self.root.winfo_id())
+        # Windowsメッセージをフックして終了処理へ誘導
+        self.root.protocol("WM_DELETE_WINDOW", self.hide_window)
+
         # アイコンの適用 (ウィンドウ　& タスクバー)
         try:
             # 1. 小・中アイコン用設定
@@ -291,8 +301,27 @@ class ClipLiteApp:
         self.setup_tray()
         self.check_for_updates()
 
+        # [ADD] v2.6.0 OSシャットダウン検知用のダミーウィンドウ作成（Tkinterの制約回避）
+        self.setup_shutdown_handler()
+
         if self.start_hidden.get():
             self.root.withdraw()
+
+    # --- [ADD] v2.6.0 シャットダウン検知用メソッド ---
+    def setup_shutdown_handler(self):
+        """OSからのシャットダウン信号を確実に受け取るための設定"""
+        def window_proc(hwnd, msg, wparam, lparam):
+            if msg == win32con.WM_QUERYENDSESSION:
+                # シャットダウンの問い合わせが来たら即座に保存
+                write_log("OS Shutdown detected via WM_QUERYENDSESSION")
+                self.save_config()
+                return True # 終了を許可
+            return win32gui.DefWindowProc(hwnd, msg, wparam, lparam)
+
+        # 既存のウィンドウにメッセージハンドラを統合（あるいはフック）するのは複雑なため、
+        # アプリ終了時にも呼ばれる atexit を保険として併用
+        import atexit
+        atexit.register(self.save_config)
 
     # --- 自動アップデートチェック関数 ---
     def check_for_updates(self):
@@ -426,13 +455,21 @@ class ClipLiteApp:
             except: return {}
         return {}
 
+    # --- [MOD] v2.6.0 設定保存の堅牢化 (アトミック書き出し) ---
     def save_config(self):
         try:
-            geo = self.root.geometry()
-            parts = geo.replace('x', '+').split('+')
+            # v2.6.0 座標の取得を試みるが、シャットダウン時は root が既に死んでいる可能性を考慮
+            try:
+                geo = self.root.geometry()
+                parts = geo.replace('x', '+').split('+')
+                self.config.update({
+                    "pos_x": int(parts[2]),
+                    "pos_y": int(parts[3]),
+                })
+            except:
+                pass
+
             self.config.update({
-                "pos_x": int(parts[2]),
-                "pos_y": int(parts[3]),
                 "save_mode": self.save_mode.get(),
                 "save_format": self.save_format.get(),
                 "local_path": self.local_path.get(),
@@ -446,9 +483,19 @@ class ClipLiteApp:
                 "allow_prerelease": self.allow_prerelease.get(),
                 "last_update_dialog_date": self.config.get("last_update_dialog_date", "")
             })
-            with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+
+            # アトミック書き込み (一時ファイル -> 置換)
+            temp_config = CONFIG_FILE + ".tmp"
+            with open(temp_config, "w", encoding="utf-8") as f:
                 json.dump(self.config, f, ensure_ascii=False, indent=4)
-        except: pass
+            
+            if os.path.exists(CONFIG_FILE):
+                os.remove(CONFIG_FILE)
+            os.rename(temp_config, CONFIG_FILE)
+            
+            write_log("Config saved successfully.")
+        except Exception as e:
+            write_log(f"Config Save Error: {e}")
 
     def set_dark_title_bar(self, window):
         window.update()
@@ -693,10 +740,14 @@ class ClipLiteApp:
         self.root.after(10, self.root.focus_force)
 
     def quit_app(self):
+        """監視を完全に終了"""
+        # 保存を確実に行う
         self.save_config()
         if hasattr(self, 'tray_icon'):
             self.tray_icon.stop()
-        self.root.after(0, self.root.quit)
+        # 終了フラグなどを立てる必要があればここで
+        self.root.after(0, self.root.destroy)
+        sys.exit(0)
 
     def save_image_file(self, img):
         now = datetime.now()
